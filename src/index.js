@@ -1956,8 +1956,14 @@ function applyDeterministicRepairRules(
       evidence
     );
   const seriousDamage =
-    /\b(?:liquid damage|water damage|corrosion|activation locked|icloud locked|mdm locked|no power|dead|motherboard|logic board|broken screen|damaged screen|broken hinge)\b/.test(
+    /\b(?:liquid damage|water damage|corrosion|activation locked|icloud locked|mdm locked|no power|motherboard|logic board|broken screen|damaged screen|broken hinge)\b/.test(
       evidence
+    );
+
+  const likelyIssue = String(analysis.likelyIssue || "").toLowerCase();
+  const simpleReplaceableIssue =
+    /\b(?:battery|ram|memory|ssd|hdd|hard drive|storage|charger|adapter|fan|lamp)\b/.test(
+      likelyIssue
     );
 
   if (
@@ -1987,6 +1993,27 @@ function applyDeterministicRepairRules(
       Number(analysis.partsCostHigh) || 60,
       60
     );
+  }
+
+  // Keep the model's risk score internally consistent. A straightforward,
+  // replaceable-part repair cannot reasonably be both high probability and
+  // maximum risk unless the listing contains separate serious-damage evidence.
+  if (simpleReplaceableIssue && !seriousDamage) {
+    const successProbability = Number(
+      analysis.repairSuccessProbability
+    ) || 0;
+
+    if (successProbability >= 75) {
+      analysis.repairRisk = Math.min(
+        Number(analysis.repairRisk) || 4,
+        4
+      );
+    } else if (successProbability >= 60) {
+      analysis.repairRisk = Math.min(
+        Number(analysis.repairRisk) || 6,
+        6
+      );
+    }
   }
 
   return analysis;
