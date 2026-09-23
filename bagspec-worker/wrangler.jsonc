@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "bagspec-ebay",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-23",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "bagspec-production",
+      "database_id": "6acc46fc-aef9-4d67-bfc7-e5d27fa40d12"
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  }
+}
