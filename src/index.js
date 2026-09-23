@@ -358,7 +358,9 @@ async function setupScannerV2(env) {
     ).run();
   }
 
-  await env.DB.prepare("UPDATE searches SET enabled = 0").run();
+  // Searches are configuration, not listing history. Replace the old set so
+  // databases with a UNIQUE(query) constraint cannot conflict with V2.
+  await env.DB.prepare("DELETE FROM searches").run();
 
   const statements = V2_SEARCHES.map(
     ([id, category, query, categoryId, maxPrice]) =>

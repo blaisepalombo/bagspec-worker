@@ -1,7 +1,7 @@
 ALTER TABLE searches ADD COLUMN category_id TEXT;
 ALTER TABLE searches ADD COLUMN profile_key TEXT;
 
-UPDATE searches SET enabled = 0;
+DELETE FROM searches;
 
 INSERT INTO searches (
   id, name, query, max_price, enabled,
