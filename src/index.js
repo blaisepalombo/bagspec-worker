@@ -220,6 +220,16 @@ function getAccessoryRejectReason(title) {
         /\b(?:charger|power adapter|ac adapter)\s+(?:for|compatible with)\b/,
       reason: "Power accessory rather than a complete device",
     },
+    {
+      pattern:
+        /\b(?:hard drive hdd|hdd hard drive|memory ram|ram memory|base cover|display assembly|replacement lcd)\b/,
+      reason: "Replacement component rather than a complete device",
+    },
+    {
+      pattern:
+        /^\s*(?:memory|ram|hdd|ssd|hard drive|lcd|screen)\b.*\b(?:for|compatible with)\b/,
+      reason: "Replacement component rather than a complete device",
+    },
   ];
 
   for (const rule of accessoryRules) {
@@ -1523,7 +1533,10 @@ async function findWorkingComparables(
     /\b(no ram|no memory|no ssd|no hard drive|no hdd|no battery|no charger|no adapter|missing ram|missing memory|missing ssd|missing hard drive|missing battery|missing charger)\b/i;
 
   const accessoryPattern =
-    /\b(charger|power adapter|ac adapter|battery only|screen only|lcd screen|display assembly|digitizer|keyboard|palmrest|touchpad|trackpad|motherboard|mainboard|logic board|hinge|bezel|bottom cover|top cover|housing|shell|case|sleeve|skin|cable|heatsink|cooling fan|replacement part|manual|dock|docking station|empty box|box only|webcam|wifi card|wireless card|optical drive|dvd drive|dc jack|power jack|usb board|daughterboard|rubber foot|rubber feet|screw set|screws|keycap|key cap|drive caddy|hdd caddy|ssd caddy|bracket|antenna|speaker set|internal speakers)\b/i;
+    /\b(charger|power adapter|ac adapter|battery only|screen only|lcd screen|display assembly|digitizer|keyboard|palmrest|touchpad|trackpad|motherboard|mainboard|logic board|hinge|bezel|base cover|bottom cover|top cover|housing|shell|case|sleeve|skin|cable|heatsink|cooling fan|replacement part|manual|dock|docking station|empty box|box only|webcam|wifi card|wireless card|optical drive|dvd drive|dc jack|power jack|usb board|daughterboard|rubber foot|rubber feet|screw set|screws|keycap|key cap|drive caddy|hdd caddy|ssd caddy|bracket|antenna|speaker set|internal speakers|hard drive hdd|hdd hard drive|memory ram|ram memory|ram ddr|replacement lcd)\b/i;
+
+  const componentForDevicePattern =
+    /\b(?:memory|ram|hdd|ssd|hard drive|lcd|screen|display|battery|keyboard|charger|adapter)\b.{0,70}\b(?:for|compatible with)\b/i;
 
   const categoryPatterns = {
     laptops: /\b(laptop|notebook|2-in-1|ultrabook|chromebook|pc)\b/i,
@@ -1554,7 +1567,8 @@ async function findWorkingComparables(
       const hasBadTitle =
         excludedTitlePattern.test(title) ||
         incompletePattern.test(title) ||
-        accessoryPattern.test(title);
+        accessoryPattern.test(title) ||
+        componentForDevicePattern.test(title);
 
       if (
         !isWorkingCondition ||
