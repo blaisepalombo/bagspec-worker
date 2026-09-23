@@ -32,6 +32,7 @@ export default {
     if (url.pathname === "/") {
       return Response.json({
         status: "BagSpec is running",
+        version: "2.0",
         scanner: "automatic",
         database: "connected",
       });
@@ -46,12 +47,34 @@ export default {
       });
     }
 
+    if (url.pathname === "/setup-v2") {
+      try {
+        return Response.json(await setupScannerV2(env));
+      } catch (error) {
+        return Response.json(
+          { error: "V2 setup failed", details: error.message },
+          { status: 500 }
+        );
+      }
+    }
+
     if (url.pathname === "/scan") {
       try {
         return Response.json(await scanListings(env));
       } catch (error) {
         return Response.json(
           { error: "Scan failed", details: error.message },
+          { status: 500 }
+        );
+      }
+    }
+
+    if (url.pathname === "/cycle") {
+      try {
+        return Response.json(await runAutomatedCycle(env));
+      } catch (error) {
+        return Response.json(
+          { error: "Cycle failed", details: error.message },
           { status: 500 }
         );
       }
@@ -131,6 +154,43 @@ export default {
       });
     }
 
+    if (url.pathname === "/deals") {
+      const { results } = await env.DB.prepare(`
+        SELECT
+          id,
+          title,
+          item_url,
+          image_url,
+          category,
+          total_buy_cost,
+          likely_issue,
+          estimated_parts_cost,
+          estimated_resale_local,
+          estimated_resale_ebay,
+          estimated_profit,
+          roi_percent,
+          repair_risk,
+          deal_score,
+          suggested_offer,
+          recommended_channel,
+          recommendation,
+          reasoning,
+          first_seen_at
+        FROM listings
+        WHERE recommendation IN ('BUY', 'WATCH')
+        ORDER BY
+          CASE recommendation WHEN 'BUY' THEN 0 ELSE 1 END,
+          deal_score DESC,
+          first_seen_at DESC
+        LIMIT 100
+      `).all();
+
+      return Response.json({
+        count: results.length,
+        deals: results,
+      });
+    }
+
     if (url.pathname === "/listings") {
       const { results } = await env.DB.prepare(`
         SELECT
@@ -196,6 +256,175 @@ function isAuthorized(request, env) {
   }
 }
 
+const CATEGORY_PROFILES = {
+  "Business Laptops": {
+    ebayCategoryId: "175672",
+    minimumComparablePrice: 80,
+    outboundShipping: 18,
+    requiredTitle:
+      /\b(laptop|notebook|thinkpad|latitude|elitebook|probook|macbook|ideapad|vivobook|zenbook)\b/i,
+  },
+  "Mini PCs": {
+    ebayCategoryId: "171957",
+    minimumComparablePrice: 70,
+    outboundShipping: 12,
+    requiredTitle:
+      /\b(mini\s*pc|mini computer|nuc|optiplex micro|prodesk mini|elitedesk mini|thinkcentre tiny)\b/i,
+  },
+  "Game Consoles": {
+    ebayCategoryId: "139971",
+    minimumComparablePrice: 60,
+    outboundShipping: 20,
+    requiredTitle:
+      /\b(console|playstation|ps[2-5]|xbox|nintendo|switch|steam deck|game boy|psp|genesis)\b/i,
+  },
+  Projectors: {
+    ebayCategoryId: "22610",
+    minimumComparablePrice: 70,
+    outboundShipping: 24,
+    requiredTitle: /\bprojector\b/i,
+  },
+  "Premium Audio": {
+    ebayCategoryId: "111694",
+    minimumComparablePrice: 55,
+    outboundShipping: 18,
+    requiredTitle:
+      /\b(speaker|soundbar|boombox|sonos|soundlink|charge|flip|xtreme)\b/i,
+  },
+  "Label Printers": {
+    ebayCategoryId: "25348",
+    minimumComparablePrice: 65,
+    outboundShipping: 16,
+    requiredTitle:
+      /\b(label printer|thermal printer|label maker|labelwriter|zebra|rollo)\b/i,
+  },
+};
+
+const V2_SEARCHES = [
+  [101, "Business Laptops", "laptop", "175672", 300],
+  [102, "Mini PCs", "mini pc", "171957", 200],
+  [103, "Game Consoles", "console", "139971", 250],
+  [104, "Projectors", "projector", "22610", 180],
+  [105, "Premium Audio", "speaker", "111694", 180],
+  [106, "Label Printers", "label printer", "25348", 220],
+];
+
+function getCategoryProfile(category) {
+  return CATEGORY_PROFILES[category] || null;
+}
+
+function getDecisionThresholds(category) {
+  const smallerItemCategories = new Set([
+    "Mini PCs",
+    "Game Consoles",
+    "Premium Audio",
+    "Label Printers",
+  ]);
+
+  if (smallerItemCategories.has(category)) {
+    return {
+      buyProfit: 40,
+      buyRoi: 45,
+      watchProfit: 25,
+      watchRoi: 30,
+      targetProfit: 40,
+    };
+  }
+
+  return {
+    buyProfit: 50,
+    buyRoi: 50,
+    watchProfit: 30,
+    watchRoi: 30,
+    targetProfit: 50,
+  };
+}
+
+async function setupScannerV2(env) {
+  const { results: columns } = await env.DB.prepare(
+    "PRAGMA table_info(searches)"
+  ).all();
+  const columnNames = new Set(columns.map((column) => column.name));
+
+  if (!columnNames.has("category_id")) {
+    await env.DB.prepare(
+      "ALTER TABLE searches ADD COLUMN category_id TEXT"
+    ).run();
+  }
+
+  if (!columnNames.has("profile_key")) {
+    await env.DB.prepare(
+      "ALTER TABLE searches ADD COLUMN profile_key TEXT"
+    ).run();
+  }
+
+  await env.DB.prepare("UPDATE searches SET enabled = 0").run();
+
+  const statements = V2_SEARCHES.map(
+    ([id, category, query, categoryId, maxPrice]) =>
+      env.DB.prepare(`
+        INSERT INTO searches (
+          id, name, query, category, max_price, enabled,
+          category_id, profile_key
+        )
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          query = excluded.query,
+          category = excluded.category,
+          max_price = excluded.max_price,
+          enabled = 1,
+          category_id = excluded.category_id,
+          profile_key = excluded.profile_key
+      `).bind(
+        id,
+        category,
+        query,
+        category,
+        maxPrice,
+        categoryId,
+        category
+      )
+  );
+
+  await env.DB.batch(statements);
+
+  const retired = await env.DB.prepare(`
+    UPDATE listings
+    SET
+      status = 'rejected',
+      analysis_status = 'filtered',
+      recommendation = 'PASS',
+      reasoning = 'Retired from the active queue by the Scanner V2 category upgrade'
+    WHERE
+      status = 'candidate'
+      AND analysis_status IN ('awaiting_details', 'details_ready')
+      AND category NOT IN (
+        'Business Laptops',
+        'Mini PCs',
+        'Game Consoles',
+        'Projectors',
+        'Premium Audio',
+        'Label Printers'
+      )
+  `).run();
+
+  return {
+    status: "BagSpec Scanner V2 configured",
+    existingListingsPreserved: true,
+    oldQueueItemsRetired: Number(retired.meta?.changes || 0),
+    enabledSearches: V2_SEARCHES.map(
+      ([, category, query, categoryId, maxPrice]) => ({
+        category,
+        query,
+        ebayCategoryId: categoryId,
+        maxPrice,
+      })
+    ),
+    next: "Open /scan to run the first targeted scan",
+  };
+}
+
 function getAccessoryRejectReason(title) {
   const text = String(title || "").toLowerCase();
 
@@ -208,6 +437,10 @@ function getAccessoryRejectReason(title) {
     {
       pattern:
         /\b(?:li-ion|lithium[- ]ion)\s+(?:laptop\s+)?battery(?:\s+pack)?\b/,
+      reason: "Battery pack rather than a complete device",
+    },
+    {
+      pattern: /\bbattery\s+pack\b/,
       reason: "Battery pack rather than a complete device",
     },
     {
@@ -241,6 +474,71 @@ function getAccessoryRejectReason(title) {
   return null;
 }
 
+function getCategoryRejectReason(title, category) {
+  const text = String(title || "").toLowerCase();
+  const profile = getCategoryProfile(category);
+
+  if (profile?.requiredTitle && !profile.requiredTitle.test(text)) {
+    return `Title does not look like a complete ${category} device`;
+  }
+
+  const categoryRules = {
+    "Business Laptops": [
+      {
+        pattern:
+          /\b(core 2 duo|core duo|intel atom|windows xp|windows vista)\b/i,
+        reason: "Laptop platform is too old for the target resale market",
+      },
+      {
+        pattern: /\b(?:i[357])[- ]?[1-6]\d{3}[a-z]{0,2}\b/i,
+        reason: "Pre-7th-generation Intel laptop is below the target value floor",
+      },
+    ],
+    "Mini PCs": [
+      {
+        pattern: /\b(thin client|zero client|raspberry pi case)\b/i,
+        reason: "Low-value thin client or component rather than a target mini PC",
+      },
+    ],
+    "Game Consoles": [
+      {
+        pattern:
+          /\b(controller|gamepad|joy-?con|dock|power supply|ac adapter|hdmi cable|disc|game|memory card)\s+only\b/i,
+        reason: "Console accessory rather than a complete console",
+      },
+    ],
+    Projectors: [
+      {
+        pattern:
+          /\b(lamp|bulb|remote|mount|color wheel|dmd chip|projector screen)\s+only\b/i,
+        reason: "Projector part or accessory rather than a complete projector",
+      },
+    ],
+    "Premium Audio": [
+      {
+        pattern:
+          /\b(driver|woofer|tweeter|grille|remote|stand|charging cradle)\s+only\b/i,
+        reason: "Audio component or accessory rather than a complete device",
+      },
+    ],
+    "Label Printers": [
+      {
+        pattern:
+          /\b(labels?|tape|ribbon|printhead|print head|roller|power supply)\s+only\b/i,
+        reason: "Printer supply or component rather than a complete printer",
+      },
+    ],
+  };
+
+  for (const rule of categoryRules[category] || []) {
+    if (rule.pattern.test(text)) {
+      return rule.reason;
+    }
+  }
+
+  return null;
+}
+
 function classifyTitle(title, totalBuyCost, category) {
   const text = title.toLowerCase();
   const accessoryReason = getAccessoryRejectReason(title);
@@ -252,6 +550,18 @@ function classifyTitle(title, totalBuyCost, category) {
       score: 0,
       recommendation: "PASS",
       reasoning: accessoryReason,
+    };
+  }
+
+  const categoryReason = getCategoryRejectReason(title, category);
+
+  if (categoryReason) {
+    return {
+      status: "rejected",
+      analysisStatus: "filtered",
+      score: 0,
+      recommendation: "PASS",
+      reasoning: categoryReason,
     };
   }
 
@@ -357,6 +667,18 @@ function classifyTitle(title, totalBuyCost, category) {
       pattern: /\b(won't charge|not charging)\b/,
       label: "Possible battery or charging repair",
     },
+    {
+      pattern: /\b(disc drive|optical drive|won't read|not reading discs?)\b/,
+      label: "Identified disc-drive issue",
+    },
+    {
+      pattern: /\b(lamp|bulb|color wheel)\b/,
+      label: "Identified projector service item",
+    },
+    {
+      pattern: /\b(feed|feeding|paper jam|label jam|roller|sensor)\b/,
+      label: "Identified printer feed issue",
+    },
   ];
 
   for (const signal of repairSignals) {
@@ -366,15 +688,19 @@ function classifyTitle(title, totalBuyCost, category) {
     }
   }
 
-  if (category === "Laptops" || category === "Game Consoles") {
+  if (
+    category === "Business Laptops" ||
+    category === "Mini PCs" ||
+    category === "Game Consoles"
+  ) {
     score += 10;
   } else if (
     category === "Projectors" ||
-    category === "Speakers"
+    category === "Label Printers"
   ) {
+    score += 8;
+  } else if (category === "Premium Audio") {
     score += 5;
-  } else if (category === "Graphics Cards") {
-    score -= 8;
   }
 
   if (totalBuyCost <= 50) {
@@ -446,7 +772,7 @@ async function scanListings(env) {
     runId = runResult.meta.last_row_id;
 
     const { results: searches } = await env.DB.prepare(`
-      SELECT id, name, query, max_price
+      SELECT *
       FROM searches
       WHERE enabled = 1
       ORDER BY id
@@ -465,6 +791,14 @@ async function scanListings(env) {
       ebayUrl.searchParams.set("q", search.query);
       ebayUrl.searchParams.set("limit", "20");
       ebayUrl.searchParams.set("sort", "newlyListed");
+
+      if (search.category_id) {
+        ebayUrl.searchParams.set(
+          "category_ids",
+          search.category_id
+        );
+      }
+
       ebayUrl.searchParams.set(
         "filter",
         `conditionIds:{7000},itemLocationCountry:US,price:[..${search.max_price}],priceCurrency:USD`
@@ -511,7 +845,7 @@ async function scanListings(env) {
           const classification = classifyTitle(
             item.title || "",
             totalBuyCost,
-            search.name
+            search.profile_key || search.category || search.name
           );
 
           return env.DB.prepare(`
@@ -540,7 +874,7 @@ async function scanListings(env) {
             item.itemWebUrl || "",
             item.image?.imageUrl || null,
             item.condition || "Unknown",
-            search.name,
+            search.profile_key || search.category || search.name,
             price,
             shipping,
             estimatedTax,
@@ -672,10 +1006,12 @@ async function prefilterExisting(env) {
 async function runAutomatedCycle(env) {
   const scan = await scanListings(env);
   const enrichment = await enrichCandidates(env, 5);
+  const analysis = await analyzeNextCandidate(env);
 
   return {
     scan,
     enrichment,
+    analysis,
   };
 }
 
@@ -860,7 +1196,9 @@ async function analyzeNextCandidate(env) {
     };
   }
 
-  const accessoryReason = getAccessoryRejectReason(listing.title);
+  const accessoryReason =
+    getAccessoryRejectReason(listing.title) ||
+    getCategoryRejectReason(listing.title, listing.category);
 
   if (accessoryReason) {
     await env.DB.prepare(`
@@ -1118,6 +1456,7 @@ instructions.
     ebayProfit >= localProfit ? "eBay" : "Local";
 
   const estimatedProfit = Math.max(ebayProfit, localProfit);
+  const thresholds = getDecisionThresholds(listing.category);
 
   const investment =
     listing.total_buy_cost +
@@ -1136,8 +1475,8 @@ instructions.
   if (
     !analysis.reject &&
     comps.count >= 3 &&
-    estimatedProfit >= 50 &&
-    roiPercent >= 50 &&
+    estimatedProfit >= thresholds.buyProfit &&
+    roiPercent >= thresholds.buyRoi &&
     successProbability >= 70 &&
     repairRisk <= 6
   ) {
@@ -1146,15 +1485,15 @@ instructions.
   } else if (
     !analysis.reject &&
     comps.count >= 3 &&
-    estimatedProfit >= 30 &&
-    roiPercent >= 30 &&
+    estimatedProfit >= thresholds.watchProfit &&
+    roiPercent >= thresholds.watchRoi &&
     successProbability >= 60
   ) {
     recommendation = "WATCH";
     newStatus = "analyzed";
   }
 
-  const targetProfit = 50;
+  const targetProfit = thresholds.targetProfit;
 
   const availableAllIn =
     recommendedChannel === "eBay"
@@ -1403,6 +1742,7 @@ async function findWorkingComparables(
   category = ""
 ) {
   const accessToken = await getEbayToken(env);
+  const categoryProfile = getCategoryProfile(category);
 
   const originalWords = String(searchQuery || "")
     .trim()
@@ -1435,6 +1775,14 @@ async function findWorkingComparables(
 
     searchUrl.searchParams.set("q", query);
     searchUrl.searchParams.set("limit", "50");
+
+    if (categoryProfile?.ebayCategoryId) {
+      searchUrl.searchParams.set(
+        "category_ids",
+        categoryProfile.ebayCategoryId
+      );
+    }
+
     searchUrl.searchParams.set(
       "filter",
       "conditions:{USED},itemLocationCountry:US"
@@ -1467,14 +1815,20 @@ async function findWorkingComparables(
 
   const minimumComparablePrices = {
     laptops: 35,
-    "game consoles": 20,
+    "business laptops": 80,
+    "mini pcs": 70,
+    "game consoles": 60,
     projectors: 20,
+    "premium audio": 55,
+    "label printers": 65,
     speakers: 15,
     "graphics cards": 20,
   };
 
   const minimumComparablePrice =
-    minimumComparablePrices[String(category).toLowerCase()] || 15;
+    categoryProfile?.minimumComparablePrice ||
+    minimumComparablePrices[String(category).toLowerCase()] ||
+    15;
 
   const normalize = (value) =>
     String(value || "")
@@ -1516,6 +1870,9 @@ async function findWorkingComparables(
     "console",
     "speaker",
     "projector",
+    "printer",
+    "label",
+    "mini",
     "graphics",
     "card",
   ]);
@@ -1540,9 +1897,17 @@ async function findWorkingComparables(
 
   const categoryPatterns = {
     laptops: /\b(laptop|notebook|2-in-1|ultrabook|chromebook|pc)\b/i,
+    "business laptops":
+      /\b(laptop|notebook|2-in-1|ultrabook|thinkpad|latitude|elitebook|probook|macbook|ideapad|vivobook|zenbook)\b/i,
+    "mini pcs":
+      /\b(mini\s*pc|mini computer|nuc|optiplex micro|prodesk mini|elitedesk mini|thinkcentre tiny)\b/i,
     "game consoles": /\b(console|system|playstation|xbox|nintendo|switch|game boy|psp|genesis)\b/i,
     projectors: /\b(projector)\b/i,
     speakers: /\b(speaker|soundbar|boombox)\b/i,
+    "premium audio":
+      /\b(speaker|soundbar|boombox|sonos|soundlink|charge|flip|xtreme)\b/i,
+    "label printers":
+      /\b(label printer|thermal printer|label maker|labelwriter|zebra|rollo)\b/i,
     "graphics cards": /\b(graphics card|video card|gpu|geforce|radeon)\b/i,
   };
 
@@ -1691,6 +2056,12 @@ async function findWorkingComparables(
 }
 
 function getOutboundShippingEstimate(category) {
+  const profile = getCategoryProfile(category);
+
+  if (profile) {
+    return profile.outboundShipping;
+  }
+
   const estimates = {
     Laptops: 18,
     "Game Consoles": 20,
