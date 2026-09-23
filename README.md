@@ -30,3 +30,5 @@ npm run deploy
 
 Cloudflare Workers Builds uses `npx wrangler deploy` automatically when a
 commit reaches the production branch.
+
+Cloudflare deployment connected.
