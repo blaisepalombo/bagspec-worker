@@ -375,16 +375,6 @@ async function getEbayToken(env) {
 
   const data = await response.json();
 
-  const minimumComparablePrices = {
-    laptops: 35,
-    "game consoles": 20,
-    projectors: 20,
-    speakers: 15,
-    "graphics cards": 20,
-  };
-
-  const minimumComparablePrice =
-    minimumComparablePrices[String(category).toLowerCase()] || 15;
   return data.access_token;
 }
 
@@ -1290,6 +1280,17 @@ async function findWorkingComparables(
   }
 
   const data = await response.json();
+
+  const minimumComparablePrices = {
+    laptops: 35,
+    "game consoles": 20,
+    projectors: 20,
+    speakers: 15,
+    "graphics cards": 20,
+  };
+
+  const minimumComparablePrice =
+    minimumComparablePrices[String(category).toLowerCase()] || 15;
 
   const normalize = (value) =>
     String(value || "")
