@@ -364,14 +364,13 @@ async function setupScannerV2(env) {
     ([id, category, query, categoryId, maxPrice]) =>
       env.DB.prepare(`
         INSERT INTO searches (
-          id, name, query, category, max_price, enabled,
+          id, name, query, max_price, enabled,
           category_id, profile_key
         )
-        VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+        VALUES (?, ?, ?, ?, 1, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           query = excluded.query,
-          category = excluded.category,
           max_price = excluded.max_price,
           enabled = 1,
           category_id = excluded.category_id,
@@ -380,7 +379,6 @@ async function setupScannerV2(env) {
         id,
         category,
         query,
-        category,
         maxPrice,
         categoryId,
         category
