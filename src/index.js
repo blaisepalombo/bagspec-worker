@@ -196,8 +196,54 @@ function isAuthorized(request, env) {
   }
 }
 
+function getAccessoryRejectReason(title) {
+  const text = String(title || "").toLowerCase();
+
+  const accessoryRules = [
+    {
+      pattern:
+        /\b(?:replacement\s+)?(?:laptop|notebook|chromebook)\s+battery(?:\s+pack)?\b/,
+      reason: "Replacement battery rather than a complete device",
+    },
+    {
+      pattern:
+        /\b(?:li-ion|lithium[- ]ion)\s+(?:laptop\s+)?battery(?:\s+pack)?\b/,
+      reason: "Battery pack rather than a complete device",
+    },
+    {
+      pattern:
+        /\b(?:lcd|led)\s+(?:screen|display)\s+(?:for|compatible with)\b/,
+      reason: "Replacement display rather than a complete device",
+    },
+    {
+      pattern:
+        /\b(?:charger|power adapter|ac adapter)\s+(?:for|compatible with)\b/,
+      reason: "Power accessory rather than a complete device",
+    },
+  ];
+
+  for (const rule of accessoryRules) {
+    if (rule.pattern.test(text)) {
+      return rule.reason;
+    }
+  }
+
+  return null;
+}
+
 function classifyTitle(title, totalBuyCost, category) {
   const text = title.toLowerCase();
+  const accessoryReason = getAccessoryRejectReason(title);
+
+  if (accessoryReason) {
+    return {
+      status: "rejected",
+      analysisStatus: "filtered",
+      score: 0,
+      recommendation: "PASS",
+      reasoning: accessoryReason,
+    };
+  }
 
   const rejectionRules = [
     {
@@ -787,7 +833,7 @@ async function enrichCandidates(env, limit = 10) {
     };
   }
 
-  async function analyzeNextCandidate(env) {
+async function analyzeNextCandidate(env) {
   const listing = await env.DB.prepare(`
     SELECT *
     FROM listings
@@ -801,6 +847,30 @@ async function enrichCandidates(env, limit = 10) {
   if (!listing) {
     return {
       status: "No enriched candidates are waiting for analysis",
+    };
+  }
+
+  const accessoryReason = getAccessoryRejectReason(listing.title);
+
+  if (accessoryReason) {
+    await env.DB.prepare(`
+      UPDATE listings
+      SET
+        status = 'rejected',
+        analysis_status = 'filtered',
+        deal_score = 0,
+        recommendation = 'PASS',
+        reasoning = ?
+      WHERE id = ?
+    `).bind(accessoryReason, listing.id).run();
+
+    return {
+      status: "Listing rejected before analysis",
+      listing: {
+        title: listing.title,
+        link: listing.item_url,
+      },
+      reason: accessoryReason,
     };
   }
 
@@ -1447,7 +1517,7 @@ async function findWorkingComparables(
   );
 
   const excludedTitlePattern =
-    /\b(for parts|parts only|not working|broken|repair|untested|as[- ]is|no power|does not power|doesn't power|read description|read desc|salvage|defective|damaged)\b/i;
+    /\b(for parts|parts only|not working|broken|repair|untested|as[- ]is|no power|does not power|doesn't power|read description|read desc|salvage|defective|damaged|lot of|bulk lot)\b/i;
 
   const incompletePattern =
     /\b(no ram|no memory|no ssd|no hard drive|no hdd|no battery|no charger|no adapter|missing ram|missing memory|missing ssd|missing hard drive|missing battery|missing charger)\b/i;
