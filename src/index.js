@@ -124,6 +124,31 @@ export default {
       }
     }
 
+    if (url.pathname === "/recheck-deals") {
+      try {
+        const result = await env.DB.prepare(`
+          UPDATE listings
+          SET
+            status = 'candidate',
+            analysis_status = 'details_ready',
+            recommendation = 'REVIEW',
+            alerted_at = NULL
+          WHERE recommendation IN ('BUY', 'WATCH')
+        `).run();
+
+        return Response.json({
+          status: "Existing deals queued for safety recheck",
+          queued: Number(result.meta?.changes || 0),
+          next: "Open /analyze to recheck the highest-priority deal",
+        });
+      } catch (error) {
+        return Response.json(
+          { error: "Deal recheck failed", details: error.message },
+          { status: 500 }
+        );
+      }
+    }
+
     if (url.pathname === "/stats") {
       const stats = await env.DB.prepare(`
         SELECT
@@ -1474,9 +1499,11 @@ Simple replaceable components such as batteries, RAM, storage drives,
 fans, power supplies, lamps, and external adapters are preferable.
 
 Parts estimates must include likely replacement parts and small supplies.
-The comparison search query must contain only the exact brand and model,
-using 2 to 7 words. Do not include words like used, broken, parts, repair,
-working, laptop, console, projector, or eBay.
+The comparison search query must identify the exact configuration, not merely
+the broad model family. Include the brand, model number, and any known year,
+generation, processor tier, RAM, or storage capacity needed to avoid mixing
+materially different versions. Use 3 to 10 words. Do not include condition or
+marketplace words such as used, broken, parts, repair, working, or eBay.
 
 Repair success probability must be an integer percentage from 0 to 100.
 For example, 80 means an 80 percent probability, not 0.80.
@@ -1597,6 +1624,7 @@ instructions.
     count: 0,
     prices: [],
     conservativeResale: 0,
+    lowConfidence: true,
   };
 
   if (!analysis.reject && analysis.comparisonSearchQuery) {
@@ -1688,6 +1716,7 @@ instructions.
 
   if (
     !analysis.reject &&
+    !comps.lowConfidence &&
     comps.count >= 3 &&
     estimatedProfit >= thresholds.buyProfit &&
     roiPercent >= thresholds.buyRoi &&
@@ -1698,6 +1727,7 @@ instructions.
     newStatus = "qualified";
   } else if (
     !analysis.reject &&
+    !comps.lowConfidence &&
     comps.count >= 3 &&
     estimatedProfit >= thresholds.watchProfit &&
     roiPercent >= thresholds.watchRoi &&
@@ -1731,8 +1761,14 @@ instructions.
     )
   );
 
+  const lowballCap = roundMoney(
+    Math.max(0, Number(listing.price || 0) * 0.8)
+  );
+
   const suggestedOffer =
-    recommendation === "PASS" ? 0 : calculatedOffer;
+    recommendation === "PASS"
+      ? 0
+      : Math.min(calculatedOffer, lowballCap);
 
   const profitScore = clamp(
     (Math.max(estimatedProfit, 0) / 100) * 35,
@@ -1764,11 +1800,15 @@ instructions.
   const finalExplanation =
     comps.count < 3
       ? `${recommendation}: BagSpec found only ${comps.count} valid working comparable listing${comps.count === 1 ? "" : "s"}, so there is not enough reliable market data to estimate resale value. The likely issue is ${analysis.likelyIssue}. Repair difficulty is ${analysis.repairDifficulty}/10, risk is ${repairRisk}/10, and estimated repair success is ${successProbability}%. Estimated parts cost is $${partsCost.toFixed(2)}. This deal is being passed because the resale value cannot be verified and the repair risk is too high.`
+      : comps.lowConfidence
+        ? `${recommendation}: BagSpec found ${comps.count} possible comparables, but their prices vary too widely to establish a reliable value for this exact configuration. The likely issue is ${analysis.likelyIssue}. Repair difficulty is ${analysis.repairDifficulty}/10, risk is ${repairRisk}/10, and estimated repair success is ${successProbability}%. Estimated parts cost is $${partsCost.toFixed(2)}. This deal is being passed until the exact configuration can be valued confidently.`
       : `${recommendation}: The likely issue is ${analysis.likelyIssue}. Repair difficulty is ${analysis.repairDifficulty}/10, risk is ${repairRisk}/10, and estimated repair success is ${successProbability}%. BagSpec found ${comps.count} valid working comparables and estimated resale at $${ebayResale.toFixed(2)} on eBay or $${localResale.toFixed(2)} locally. Estimated parts cost is $${partsCost.toFixed(2)}, producing an estimated ${recommendedChannel} profit of $${estimatedProfit.toFixed(2)} and an ROI of ${roiPercent.toFixed(1)}%.`;
 
   const financialBreakdown = {
     comparisonSearchQuery: analysis.comparisonSearchQuery,
     comparableCount: comps.count,
+    comparableLowConfidence: comps.lowConfidence,
+    comparablePriceSpread: comps.priceSpread || 0,
     comparablePrices: comps.prices.slice(0, 10),
     purchaseCost: listing.total_buy_cost,
     estimatedPartsCost: partsCost,
@@ -1845,6 +1885,8 @@ instructions.
       comparisonSearchQuery: analysis.comparisonSearchQuery,
       searchQueriesTried: comps.searchQueriesTried || [],
       comparableCount: comps.count,
+      lowConfidence: comps.lowConfidence,
+      priceSpread: comps.priceSpread || 0,
       ebay: ebayResale,
       local: localResale,
       comparableSamples: (comps.comparables || [])
@@ -1989,6 +2031,7 @@ async function findWorkingComparables(
 
     searchUrl.searchParams.set("q", query);
     searchUrl.searchParams.set("limit", "50");
+    searchUrl.searchParams.set("sort", "price");
 
     if (categoryProfile?.ebayCategoryId) {
       searchUrl.searchParams.set(
@@ -2065,13 +2108,20 @@ async function findWorkingComparables(
         /\d/.test(word)
     )
     .sort((a, b) => {
-      const aNumeric = /^\d+$/.test(a) ? 1 : 0;
-      const bNumeric = /^\d+$/.test(b) ? 1 : 0;
+      const aMixed = /[a-z]/.test(a) && /\d/.test(a) ? 1 : 0;
+      const bMixed = /[a-z]/.test(b) && /\d/.test(b) ? 1 : 0;
 
-      return bNumeric - aNumeric || b.length - a.length;
+      return bMixed - aMixed || b.length - a.length;
     });
 
   const strongestModelToken = modelTokens[0] || null;
+  const configurationTokens = queryWords.filter(
+    (word) =>
+      word !== strongestModelToken &&
+      (/^20\d{2}$/.test(word) ||
+        /^\d+(?:gb|tb)$/.test(word) ||
+        /^(?:i[3579]|m[357]|ryzen\d?|xeon)\d*[a-z0-9]*$/.test(word))
+  );
 
   const ignoredWords = new Set([
     "the",
@@ -2176,6 +2226,22 @@ async function findWorkingComparables(
         return false;
       }
 
+      if (configurationTokens.length > 0) {
+        const configurationMatches = configurationTokens.filter(
+          (token) => normalizedTitle.includes(token)
+        );
+        const requiredConfigurationMatches = Math.min(
+          2,
+          configurationTokens.length
+        );
+
+        if (
+          configurationMatches.length < requiredConfigurationMatches
+        ) {
+          return false;
+        }
+      }
+
       // If there is no usable model number, require at least
       // two meaningful product-name matches.
       if (!strongestModelToken && productTokens.length) {
@@ -2249,6 +2315,8 @@ async function findWorkingComparables(
       comparables: cleanedItems.slice(0, 10),
       searchQueriesTried: searchQueries,
       conservativeResale: 0,
+      lowConfidence: true,
+      priceSpread: 0,
     };
   }
 
@@ -2256,16 +2324,28 @@ async function findWorkingComparables(
     (prices.length - 1) * 0.25
   );
 
+  const upperQuartileIndex = Math.floor(
+    (prices.length - 1) * 0.75
+  );
+
   const lowerQuartile = prices[lowerQuartileIndex];
+  const upperQuartile = prices[upperQuartileIndex];
+  const priceSpread =
+    lowerQuartile > 0
+      ? roundMoney(upperQuartile / lowerQuartile)
+      : 99;
+  const lowConfidence = priceSpread > 1.65;
 
   return {
     count: prices.length,
     prices,
     comparables: cleanedItems.slice(0, 10),
     searchQueriesTried: searchQueries,
-    conservativeResale: roundMoney(
-      lowerQuartile * 0.9
-    ),
+    lowConfidence,
+    priceSpread,
+    conservativeResale: lowConfidence
+      ? 0
+      : roundMoney(lowerQuartile * 0.9),
   };
 }
 
