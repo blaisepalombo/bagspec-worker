@@ -24,6 +24,7 @@ The following secrets stay in Cloudflare and must never be committed:
 - `EBAY_CLIENT_SECRET`
 - `EBAY_VERIFICATION_TOKEN`
 - `BAGSPEC_ADMIN_KEY`
+- `DISCORD_WEBHOOK_URL`
 
 ## Commands
 
@@ -45,6 +46,8 @@ the `BAGSPEC_ADMIN_KEY` secret as the password.
 - `/setup-v2`: idempotently upgrades the existing D1 configuration and keeps
   historical listings.
 - `/cycle`: runs a scan, enriches up to five listings, and analyzes the best
-  ready candidate.
+  ready candidate, then sends any unalerted `BUY` deals to Discord.
+- `/test-discord`: sends a harmless test notification to the configured
+  Discord webhook.
 - `/deals`: shows all current `BUY` and `WATCH` results.
 - `/stats`, `/listings`, and `/candidates`: operational views.

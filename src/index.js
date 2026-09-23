@@ -113,6 +113,17 @@ export default {
       }
     }
 
+    if (url.pathname === "/test-discord") {
+      try {
+        return Response.json(await sendDiscordTest(env));
+      } catch (error) {
+        return Response.json(
+          { error: "Discord test failed", details: error.message },
+          { status: 500 }
+        );
+      }
+    }
+
     if (url.pathname === "/stats") {
       const stats = await env.DB.prepare(`
         SELECT
@@ -1007,11 +1018,214 @@ async function runAutomatedCycle(env) {
   const scan = await scanListings(env);
   const enrichment = await enrichCandidates(env, 5);
   const analysis = await analyzeNextCandidate(env);
+  const alerts = await sendPendingDealAlerts(env, 3);
 
   return {
     scan,
     enrichment,
     analysis,
+    alerts,
+  };
+}
+
+function truncateDiscord(value, maximum = 1024) {
+  const text = String(value ?? "");
+
+  if (text.length <= maximum) {
+    return text;
+  }
+
+  return `${text.slice(0, maximum - 1)}…`;
+}
+
+async function postDiscordWebhook(env, payload) {
+  if (!env.DISCORD_WEBHOOK_URL) {
+    throw new Error(
+      "DISCORD_WEBHOOK_URL has not been added as a Cloudflare secret"
+    );
+  }
+
+  const response = await fetch(env.DISCORD_WEBHOOK_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      ...payload,
+      allowed_mentions: { parse: [] },
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Discord returned ${response.status}: ${(
+        await response.text()
+      ).slice(0, 300)}`
+    );
+  }
+}
+
+async function sendDiscordTest(env) {
+  await postDiscordWebhook(env, {
+    content: "✅ BagSpec Discord alerts are connected.",
+    embeds: [
+      {
+        title: "Test alert successful",
+        description:
+          "BagSpec will post a message here when it finds a qualified BUY deal.",
+        color: 0x2ecc71,
+      },
+    ],
+  });
+
+  return {
+    status: "Discord test sent",
+  };
+}
+
+function buildDiscordDealPayload(listing) {
+  let financials = {};
+
+  try {
+    financials = JSON.parse(listing.reasoning || "{}");
+  } catch {
+    financials = {};
+  }
+
+  const successProbability = Number(
+    financials.repairSuccessProbability || 0
+  );
+  const redFlags = Array.isArray(financials.redFlags)
+    ? financials.redFlags
+    : [];
+  const explanation =
+    financials.explanation ||
+    `Likely repair: ${listing.likely_issue || "Unknown"}`;
+
+  const embed = {
+    title: truncateDiscord(listing.title, 256),
+    url: listing.item_url,
+    description: truncateDiscord(explanation, 1000),
+    color: 0x2ecc71,
+    fields: [
+      {
+        name: "Buy cost",
+        value: `$${Number(listing.total_buy_cost || 0).toFixed(2)}`,
+        inline: true,
+      },
+      {
+        name: "Suggested offer",
+        value: `$${Number(listing.suggested_offer || 0).toFixed(2)}`,
+        inline: true,
+      },
+      {
+        name: "Expected profit",
+        value: `$${Number(listing.estimated_profit || 0).toFixed(2)}`,
+        inline: true,
+      },
+      {
+        name: "Resale",
+        value:
+          `eBay $${Number(listing.estimated_resale_ebay || 0).toFixed(2)}\n` +
+          `Local $${Number(listing.estimated_resale_local || 0).toFixed(2)}`,
+        inline: true,
+      },
+      {
+        name: "Repair",
+        value:
+          `${truncateDiscord(listing.likely_issue || "Unknown", 150)}\n` +
+          `Parts: $${Number(listing.estimated_parts_cost || 0).toFixed(2)}`,
+        inline: true,
+      },
+      {
+        name: "Risk",
+        value:
+          `${Number(listing.repair_risk || 0)}/10 risk\n` +
+          `${successProbability}% success`,
+        inline: true,
+      },
+      {
+        name: "Recommendation",
+        value:
+          `BUY • Score ${Number(listing.deal_score || 0)}/100 • ` +
+          `${listing.recommended_channel || "Best available channel"}`,
+        inline: false,
+      },
+    ],
+    footer: {
+      text: "BagSpec • Verify the listing before purchasing",
+    },
+  };
+
+  if (redFlags.length > 0) {
+    embed.fields.push({
+      name: "Red flags",
+      value: truncateDiscord(redFlags.join(" • "), 1000),
+      inline: false,
+    });
+  }
+
+  if (listing.image_url) {
+    embed.thumbnail = { url: listing.image_url };
+  }
+
+  return {
+    content: "🔥 **BagSpec found a BUY deal**",
+    embeds: [embed],
+  };
+}
+
+async function sendPendingDealAlerts(env, limit = 3) {
+  if (!env.DISCORD_WEBHOOK_URL) {
+    return {
+      status: "Discord not configured",
+      sent: 0,
+    };
+  }
+
+  const safeLimit = Math.min(Math.max(Number(limit) || 3, 1), 10);
+  const { results: listings } = await env.DB.prepare(`
+    SELECT *
+    FROM listings
+    WHERE
+      recommendation = 'BUY'
+      AND alerted_at IS NULL
+    ORDER BY deal_score DESC, first_seen_at ASC
+    LIMIT ?
+  `).bind(safeLimit).all();
+
+  const sent = [];
+  const failed = [];
+
+  for (const listing of listings) {
+    try {
+      await postDiscordWebhook(
+        env,
+        buildDiscordDealPayload(listing)
+      );
+
+      await env.DB.prepare(`
+        UPDATE listings
+        SET alerted_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND alerted_at IS NULL
+      `).bind(listing.id).run();
+
+      sent.push({ id: listing.id, title: listing.title });
+    } catch (error) {
+      failed.push({
+        id: listing.id,
+        title: listing.title,
+        error: error.message,
+      });
+    }
+  }
+
+  return {
+    status: "Discord alert check completed",
+    sent: sent.length,
+    failed: failed.length,
+    sentItems: sent,
+    failedItems: failed,
   };
 }
 
