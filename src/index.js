@@ -955,7 +955,11 @@ instructions.
     }
   );
 
-  const analysis = parseAiResponse(aiResult);
+  const analysis = applyDeterministicRepairRules(
+    parseAiResponse(aiResult),
+    listing,
+    savedDetails
+  );
 
   let comps = {
     count: 0,
@@ -1205,6 +1209,8 @@ instructions.
       estimatedPartsCost: partsCost,
     },
     resale: {
+      comparisonSearchQuery: analysis.comparisonSearchQuery,
+      searchQueriesTried: comps.searchQueriesTried || [],
       comparableCount: comps.count,
       ebay: ebayResale,
       local: localResale,
@@ -1248,6 +1254,69 @@ function parseAiResponse(result) {
   return JSON.parse(value);
 }
 
+function applyDeterministicRepairRules(
+  analysis,
+  listing,
+  savedDetails
+) {
+  const evidence = [
+    listing.title,
+    listing.condition,
+    savedDetails.shortDescription,
+    savedDetails.conditionDescription,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  const bootsToBios = /\bboot(?:s|ed|ing)?\s+to\s+bios\b/.test(
+    evidence
+  );
+  const missingStorage =
+    /\b(?:no|missing|without)\s+(?:ssd|hdd|hard drive|storage)\b/.test(
+      evidence
+    );
+  const additionalMissingParts =
+    /\b(?:no|missing|without)\s+(?:ram|memory|battery|charger|adapter)\b/.test(
+      evidence
+    );
+  const seriousDamage =
+    /\b(?:liquid damage|water damage|corrosion|activation locked|icloud locked|mdm locked|no power|dead|motherboard|logic board|broken screen|damaged screen|broken hinge)\b/.test(
+      evidence
+    );
+
+  if (
+    bootsToBios &&
+    missingStorage &&
+    !additionalMissingParts &&
+    !seriousDamage
+  ) {
+    analysis.likelyIssue = "Missing SSD; system reaches BIOS";
+    analysis.repairDifficulty = Math.min(
+      Number(analysis.repairDifficulty) || 3,
+      3
+    );
+    analysis.repairRisk = Math.min(
+      Number(analysis.repairRisk) || 3,
+      3
+    );
+    analysis.repairSuccessProbability = Math.max(
+      Number(analysis.repairSuccessProbability) || 0,
+      80
+    );
+    analysis.partsCostLow = Math.min(
+      Number(analysis.partsCostLow) || 35,
+      35
+    );
+    analysis.partsCostHigh = Math.min(
+      Number(analysis.partsCostHigh) || 60,
+      60
+    );
+  }
+
+  return analysis;
+}
+
 async function findWorkingComparables(
   env,
   searchQuery,
@@ -1255,31 +1324,66 @@ async function findWorkingComparables(
 ) {
   const accessToken = await getEbayToken(env);
 
-  const searchUrl = new URL(
-    "https://api.ebay.com/buy/browse/v1/item_summary/search"
-  );
+  const originalWords = String(searchQuery || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
 
-  searchUrl.searchParams.set("q", searchQuery);
-  searchUrl.searchParams.set("limit", "50");
-  searchUrl.searchParams.set(
-    "filter",
-    "conditions:{USED},itemLocationCountry:US"
-  );
+  const searchQueries = [originalWords.join(" ")];
+  const lastWord = originalWords.at(-1) || "";
+  const previousWord = originalWords.at(-2) || "";
 
-  const response = await fetch(searchUrl, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      `Comparable search failed ${response.status}: ${await response.text()}`
-    );
+  // Model suffixes are occasionally mistyped in listing titles, such as
+  // 13IKB becoming 131KB. Keep the exact search, then try the stable family
+  // model when the query already contains a numeric series identifier.
+  if (
+    originalWords.length >= 4 &&
+    /[a-z]/i.test(lastWord) &&
+    /\d/.test(lastWord) &&
+    /^\d{3,5}$/.test(previousWord)
+  ) {
+    searchQueries.push(originalWords.slice(0, -1).join(" "));
   }
 
-  const data = await response.json();
+  const itemSummaries = [];
+  const seenItemIds = new Set();
+
+  for (const query of searchQueries) {
+    const searchUrl = new URL(
+      "https://api.ebay.com/buy/browse/v1/item_summary/search"
+    );
+
+    searchUrl.searchParams.set("q", query);
+    searchUrl.searchParams.set("limit", "50");
+    searchUrl.searchParams.set(
+      "filter",
+      "conditions:{USED},itemLocationCountry:US"
+    );
+
+    const response = await fetch(searchUrl, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `Comparable search failed ${response.status}: ${await response.text()}`
+      );
+    }
+
+    const data = await response.json();
+
+    for (const item of data.itemSummaries || []) {
+      const itemId = item.itemId || item.itemWebUrl || item.title;
+
+      if (!seenItemIds.has(itemId)) {
+        seenItemIds.add(itemId);
+        itemSummaries.push(item);
+      }
+    }
+  }
 
   const minimumComparablePrices = {
     laptops: 35,
@@ -1297,7 +1401,9 @@ async function findWorkingComparables(
       .toLowerCase()
       .replace(/[^a-z0-9]/g, "");
 
-  const queryWords = searchQuery
+  const matchingQuery = searchQueries.at(-1) || searchQuery;
+
+  const queryWords = matchingQuery
     .toLowerCase()
     .split(/\s+/)
     .map(normalize)
@@ -1307,10 +1413,15 @@ async function findWorkingComparables(
   const modelTokens = queryWords
     .filter(
       (word) =>
-        word.length >= 4 &&
+        word.length >= 3 &&
         /\d/.test(word)
     )
-    .sort((a, b) => b.length - a.length);
+    .sort((a, b) => {
+      const aNumeric = /^\d+$/.test(a) ? 1 : 0;
+      const bNumeric = /^\d+$/.test(b) ? 1 : 0;
+
+      return bNumeric - aNumeric || b.length - a.length;
+    });
 
   const strongestModelToken = modelTokens[0] || null;
 
@@ -1355,7 +1466,7 @@ async function findWorkingComparables(
   const requiredCategoryPattern =
     categoryPatterns[String(category).toLowerCase()] || null;
 
-  const comparableItems = (data.itemSummaries || [])
+  const comparableItems = itemSummaries
     .filter((item) => {
       const title = String(item.title || "");
       const normalizedTitle = normalize(title);
@@ -1385,7 +1496,11 @@ async function findWorkingComparables(
 
       if (
         requiredCategoryPattern &&
-        !requiredCategoryPattern.test(title)
+        !requiredCategoryPattern.test(title) &&
+        !(
+          strongestModelToken &&
+          normalizedTitle.includes(strongestModelToken)
+        )
       ) {
         return false;
       }
@@ -1469,6 +1584,7 @@ async function findWorkingComparables(
       count: prices.length,
       prices,
       comparables: cleanedItems.slice(0, 10),
+      searchQueriesTried: searchQueries,
       conservativeResale: 0,
     };
   }
@@ -1483,6 +1599,7 @@ async function findWorkingComparables(
     count: prices.length,
     prices,
     comparables: cleanedItems.slice(0, 10),
+    searchQueriesTried: searchQueries,
     conservativeResale: roundMoney(
       lowerQuartile * 0.9
     ),
