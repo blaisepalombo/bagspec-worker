@@ -1041,15 +1041,64 @@ async function prefilterExisting(env) {
 
 async function runAutomatedCycle(env) {
   const scan = await scanListings(env);
-  const enrichment = await enrichCandidates(env, 5);
-  const analysis = await analyzeNextCandidate(env);
-  const alerts = await sendPendingDealAlerts(env, 3);
+  // Balance Browse API usage between item details and comparable searches.
+  // Three complete evaluations per cycle triples throughput without changing
+  // the conservative BUY gates or exceeding the default daily call budget.
+  const enrichment = await enrichCandidates(env, 3);
+  const analysis = await analyzeCandidateBatch(env, 3);
+  const alerts = await sendPendingDealAlerts(env, 5);
 
   return {
     scan,
     enrichment,
     analysis,
     alerts,
+  };
+}
+
+async function analyzeCandidateBatch(env, limit = 3) {
+  const safeLimit = Math.min(
+    Math.max(Number(limit) || 3, 1),
+    5
+  );
+  const results = [];
+
+  for (let index = 0; index < safeLimit; index += 1) {
+    let result;
+
+    try {
+      result = await analyzeNextCandidate(env);
+    } catch (error) {
+      results.push({
+        status: "Analysis failed",
+        details: error.message,
+      });
+      break;
+    }
+
+    if (
+      result.status ===
+      "No enriched candidates are waiting for analysis"
+    ) {
+      break;
+    }
+
+    results.push(result);
+  }
+
+  return {
+    status: "Analysis batch completed",
+    attempted: results.length,
+    completed: results.filter(
+      (result) => result.status === "Analysis completed"
+    ).length,
+    filtered: results.filter(
+      (result) => result.status === "Listing rejected before analysis"
+    ).length,
+    failed: results.filter(
+      (result) => result.status === "Analysis failed"
+    ).length,
+    results,
   };
 }
 
