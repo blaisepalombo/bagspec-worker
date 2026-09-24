@@ -1040,10 +1040,10 @@ async function prefilterExisting(env) {
 }
 
 async function runAutomatedCycle(env) {
+  await ensureRuntimeTables(env);
   const scan = await scanListings(env);
-  // Balance Browse API usage between item details and comparable searches.
-  // Three complete evaluations per cycle triples throughput without changing
-  // the conservative BUY gates or exceeding the default daily call budget.
+  // Screen several category-balanced candidates with the inexpensive model.
+  // The large model is reserved for listings that already clear every BUY gate.
   const enrichment = await enrichCandidates(env, 3);
   const analysis = await analyzeCandidateBatch(env, 3);
   const alerts = await sendPendingDealAlerts(env, 5);
@@ -1062,13 +1062,15 @@ async function analyzeCandidateBatch(env, limit = 3) {
     5
   );
   const results = [];
+  const usedCategories = [];
 
   for (let index = 0; index < safeLimit; index += 1) {
     let result;
 
     try {
-      result = await analyzeNextCandidate(env);
+      result = await analyzeNextCandidate(env, usedCategories);
     } catch (error) {
+      await handleAnalysisError(env, error);
       results.push({
         status: "Analysis failed",
         details: error.message,
@@ -1084,6 +1086,10 @@ async function analyzeCandidateBatch(env, limit = 3) {
     }
 
     results.push(result);
+
+    if (result.listing?.category) {
+      usedCategories.push(result.listing.category);
+    }
   }
 
   return {
@@ -1100,6 +1106,99 @@ async function analyzeCandidateBatch(env, limit = 3) {
     ).length,
     results,
   };
+}
+
+async function ensureRuntimeTables(env) {
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS ai_usage (
+      usage_day TEXT PRIMARY KEY,
+      screening_calls INTEGER NOT NULL DEFAULT 0,
+      verification_calls INTEGER NOT NULL DEFAULT 0
+    )
+  `).run();
+
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS system_events (
+      event_key TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+}
+
+async function recordAiUsage(env, column) {
+  const allowedColumns = new Set([
+    "screening_calls",
+    "verification_calls",
+  ]);
+
+  if (!allowedColumns.has(column)) {
+    return;
+  }
+
+  await ensureRuntimeTables(env);
+  await env.DB.prepare(`
+    INSERT INTO ai_usage (usage_day, ${column})
+    VALUES (date('now'), 1)
+    ON CONFLICT(usage_day) DO UPDATE SET
+      ${column} = ${column} + 1
+  `).run();
+}
+
+async function getVerificationCallsToday(env) {
+  await ensureRuntimeTables(env);
+  const row = await env.DB.prepare(`
+    SELECT verification_calls
+    FROM ai_usage
+    WHERE usage_day = date('now')
+  `).first();
+
+  return Number(row?.verification_calls || 0);
+}
+
+function isAiQuotaError(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+
+  return (
+    message.includes("4006") ||
+    message.includes("daily free allocation") ||
+    message.includes("used up your daily")
+  );
+}
+
+async function handleAnalysisError(env, error) {
+  if (!isAiQuotaError(error) || !env.DISCORD_WEBHOOK_URL) {
+    return;
+  }
+
+  await ensureRuntimeTables(env);
+  const eventKey = `ai-quota-${new Date().toISOString().slice(0, 10)}`;
+  const existing = await env.DB.prepare(`
+    SELECT event_key FROM system_events WHERE event_key = ?
+  `).bind(eventKey).first();
+
+  if (existing) {
+    return;
+  }
+
+  try {
+    await postDiscordWebhook(env, {
+      content: "⚠️ **BagSpec AI quota paused analysis**",
+      embeds: [
+        {
+          title: "Listings are still being collected",
+          description:
+            "The free Workers AI allowance is exhausted for today. New eBay listings remain safely queued and analysis will resume after the daily reset.",
+          color: 0xf1c40f,
+        },
+      ],
+    });
+
+    await env.DB.prepare(`
+      INSERT OR IGNORE INTO system_events (event_key) VALUES (?)
+    `).bind(eventKey).run();
+  } catch {
+    // A failed operational alert must never stop the scanner.
+  }
 }
 
 function truncateDiscord(value, maximum = 1024) {
@@ -1309,15 +1408,26 @@ async function enrichCandidates(env, limit = 10) {
     20
   );
 
-  const { results: listings } = await env.DB.prepare(`
-    SELECT id, ebay_item_id, title
+  const { results: rankedListings } = await env.DB.prepare(`
+    SELECT id, ebay_item_id, title, category, deal_score, first_seen_at
     FROM listings
     WHERE
       status = 'candidate'
       AND analysis_status = 'awaiting_details'
-    ORDER BY deal_score DESC, first_seen_at DESC
-    LIMIT ?
-  `).bind(safeLimit).all();
+    ORDER BY
+      deal_score + CASE
+        WHEN first_seen_at >= datetime('now', '-1 hour') THEN 12
+        WHEN first_seen_at >= datetime('now', '-6 hours') THEN 6
+        ELSE 0
+      END DESC,
+      first_seen_at DESC
+    LIMIT 60
+  `).all();
+
+  const listings = selectCategoryBalancedListings(
+    rankedListings,
+    safeLimit
+  );
 
   if (listings.length === 0) {
     return {
@@ -1467,16 +1577,81 @@ async function enrichCandidates(env, limit = 10) {
     };
   }
 
-async function analyzeNextCandidate(env) {
-  const listing = await env.DB.prepare(`
+function selectCategoryBalancedListings(listings, limit) {
+  const selected = [];
+  const selectedIds = new Set();
+  const usedCategories = new Set();
+
+  for (const listing of listings) {
+    const category = listing.category || "Uncategorized";
+
+    if (!usedCategories.has(category)) {
+      selected.push(listing);
+      selectedIds.add(listing.id);
+      usedCategories.add(category);
+    }
+
+    if (selected.length >= limit) {
+      return selected;
+    }
+  }
+
+  for (const listing of listings) {
+    if (!selectedIds.has(listing.id)) {
+      selected.push(listing);
+      selectedIds.add(listing.id);
+    }
+
+    if (selected.length >= limit) {
+      break;
+    }
+  }
+
+  return selected;
+}
+
+async function analyzeNextCandidate(env, excludedCategories = []) {
+  const exclusions = Array.isArray(excludedCategories)
+    ? excludedCategories.filter(Boolean)
+    : [];
+  const exclusionSql = exclusions.length
+    ? `AND category NOT IN (${exclusions.map(() => "?").join(", ")})`
+    : "";
+
+  let listing = await env.DB.prepare(`
     SELECT *
     FROM listings
     WHERE
       status = 'candidate'
       AND analysis_status = 'details_ready'
-    ORDER BY deal_score DESC, first_seen_at DESC
+      ${exclusionSql}
+    ORDER BY
+      deal_score + CASE
+        WHEN first_seen_at >= datetime('now', '-1 hour') THEN 12
+        WHEN first_seen_at >= datetime('now', '-6 hours') THEN 6
+        ELSE 0
+      END DESC,
+      first_seen_at DESC
     LIMIT 1
-  `).first();
+  `).bind(...exclusions).first();
+
+  if (!listing && exclusions.length > 0) {
+    listing = await env.DB.prepare(`
+      SELECT *
+      FROM listings
+      WHERE
+        status = 'candidate'
+        AND analysis_status = 'details_ready'
+      ORDER BY
+        deal_score + CASE
+          WHEN first_seen_at >= datetime('now', '-1 hour') THEN 12
+          WHEN first_seen_at >= datetime('now', '-6 hours') THEN 6
+          ELSE 0
+        END DESC,
+        first_seen_at DESC
+      LIMIT 1
+    `).first();
+  }
 
   if (!listing) {
     return {
@@ -1505,6 +1680,7 @@ async function analyzeNextCandidate(env) {
       listing: {
         title: listing.title,
         link: listing.item_url,
+        category: listing.category,
       },
       reason: accessoryReason,
     };
@@ -1532,13 +1708,13 @@ async function analyzeNextCandidate(env) {
   };
 
   const aiResult = await env.AI.run(
-    "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    "@cf/ibm-granite/granite-4.0-h-micro",
     {
       messages: [
         {
           role: "system",
           content: `
-You are a conservative electronics repair and resale analyst.
+You are a conservative electronics repair screener.
 
 Evaluate damaged or nonworking electronics for a DIY repair flipper.
 Never invent facts that are not in the listing.
@@ -1575,96 +1751,29 @@ The explanation must discuss only the actual item, likely repair, evidence,
 repair difficulty, and uncertainty. Do not estimate resale value or profit.
 Never explain how the comparison query was constructed or refer to these
 instructions.
+
+Return only one valid JSON object with these keys:
+itemName, comparisonSearchQuery, likelyIssue, repairDifficulty, repairRisk,
+repairSuccessProbability, partsCostLow, partsCostHigh, laborHours, redFlags,
+reject, rejectReason, explanation. Do not use Markdown.
           `.trim(),
         },
         {
           role: "user",
           content:
             "Analyze this listing:\n" +
-            JSON.stringify(listingData).slice(0, 12000),
+            JSON.stringify(listingData).slice(0, 7000),
         },
       ],
       temperature: 0.1,
-      max_tokens: 700,
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          type: "object",
-          properties: {
-            itemName: {
-              type: "string",
-            },
-            comparisonSearchQuery: {
-              type: "string",
-            },
-            likelyIssue: {
-              type: "string",
-            },
-            repairDifficulty: {
-              type: "integer",
-              minimum: 1,
-              maximum: 10,
-            },
-            repairRisk: {
-              type: "integer",
-              minimum: 1,
-              maximum: 10,
-            },
-            repairSuccessProbability: {
-              type: "integer",
-              minimum: 0,
-              maximum: 100,
-            },
-            partsCostLow: {
-              type: "number",
-              minimum: 0,
-            },
-            partsCostHigh: {
-              type: "number",
-              minimum: 0,
-            },
-            laborHours: {
-              type: "number",
-              minimum: 0,
-            },
-            redFlags: {
-              type: "array",
-              items: {
-                type: "string",
-              },
-            },
-            reject: {
-              type: "boolean",
-            },
-            rejectReason: {
-              type: "string",
-            },
-            explanation: {
-              type: "string",
-            },
-          },
-          required: [
-            "itemName",
-            "comparisonSearchQuery",
-            "likelyIssue",
-            "repairDifficulty",
-            "repairRisk",
-            "repairSuccessProbability",
-            "partsCostLow",
-            "partsCostHigh",
-            "laborHours",
-            "redFlags",
-            "reject",
-            "rejectReason",
-            "explanation"
-          ],
-        },
-      },
+      max_tokens: 450,
     }
   );
 
+  await recordAiUsage(env, "screening_calls");
+
   const analysis = applyDeterministicRepairRules(
-    parseAiResponse(aiResult),
+    normalizeRepairAnalysis(parseAiResponse(aiResult)),
     listing,
     savedDetails
   );
@@ -1762,6 +1871,7 @@ instructions.
 
   let recommendation = "PASS";
   let newStatus = "rejected";
+  let verification = null;
 
   if (
     !analysis.reject &&
@@ -1784,6 +1894,48 @@ instructions.
   ) {
     recommendation = "WATCH";
     newStatus = "analyzed";
+  }
+
+  if (recommendation === "BUY") {
+    const verificationCalls = await getVerificationCallsToday(env);
+
+    if (verificationCalls >= 5) {
+      verification = {
+        approved: false,
+        reason:
+          "Daily large-model verification cap reached. Kept as WATCH for safety.",
+        redFlags: [],
+      };
+    } else {
+      try {
+        verification = await verifyPotentialBuy(env, {
+          listing: listingData,
+          screening: analysis,
+          comparableCount: comps.count,
+          comparableSamples: (comps.comparables || []).slice(0, 5),
+          ebayResale,
+          localResale,
+          purchaseCost: listing.total_buy_cost,
+          partsCost,
+          riskReserve,
+          recommendedChannel,
+          estimatedProfit,
+          roiPercent,
+        });
+      } catch (error) {
+        await handleAnalysisError(env, error);
+        verification = {
+          approved: false,
+          reason: `Final verification unavailable: ${String(error.message || error).slice(0, 180)}`,
+          redFlags: [],
+        };
+      }
+    }
+
+    if (!verification.approved) {
+      recommendation = "WATCH";
+      newStatus = "analyzed";
+    }
   }
 
   const targetProfit = thresholds.targetProfit;
@@ -1877,6 +2029,7 @@ instructions.
     repairRisk,
     repairSuccessProbability: successProbability,
     redFlags: analysis.redFlags,
+    finalVerification: verification,
     explanation: finalExplanation,
     rejectReason: analysis.rejectReason,
   };
@@ -1921,6 +2074,7 @@ instructions.
     listing: {
       title: listing.title,
       link: listing.item_url,
+      category: listing.category,
       totalPurchaseCost: listing.total_buy_cost,
     },
     repair: {
@@ -1952,9 +2106,66 @@ instructions.
       estimatedProfit,
       roiPercent,
       suggestedOffer,
+      finalVerification: verification,
     },
     redFlags: analysis.redFlags,
     explanation: finalExplanation,
+  };
+}
+
+async function verifyPotentialBuy(env, context) {
+  const result = await env.AI.run(
+    "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    {
+      messages: [
+        {
+          role: "system",
+          content: `
+You are the final safety reviewer for an electronics repair purchase.
+Approve only when the listing evidence supports the diagnosis, the repair is
+realistic for a DIY flipper, the parts estimate is conservative, the working
+comparables match the actual device, and the stated profit has adequate room
+for uncertainty. Reject locks, liquid damage, corrosion, unknown no-power or
+board-level faults, suspicious comparables, and unsupported assumptions.
+Do not redo arithmetic. Return concise JSON only.
+          `.trim(),
+        },
+        {
+          role: "user",
+          content:
+            "Verify this potential BUY:\n" +
+            JSON.stringify(context).slice(0, 10000),
+        },
+      ],
+      temperature: 0,
+      max_tokens: 300,
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          type: "object",
+          properties: {
+            approved: { type: "boolean" },
+            reason: { type: "string" },
+            redFlags: {
+              type: "array",
+              items: { type: "string" },
+            },
+          },
+          required: ["approved", "reason", "redFlags"],
+        },
+      },
+    }
+  );
+
+  await recordAiUsage(env, "verification_calls");
+  const verification = parseAiResponse(result);
+
+  return {
+    approved: verification.approved === true,
+    reason: String(verification.reason || "No verification reason supplied"),
+    redFlags: Array.isArray(verification.redFlags)
+      ? verification.redFlags.map(String).slice(0, 8)
+      : [],
   };
 }
 
@@ -1975,7 +2186,48 @@ function parseAiResponse(result) {
     .replace(/```$/i, "")
     .trim();
 
+  const objectStart = value.indexOf("{");
+  const objectEnd = value.lastIndexOf("}");
+
+  if (objectStart >= 0 && objectEnd > objectStart) {
+    value = value.slice(objectStart, objectEnd + 1);
+  }
+
   return JSON.parse(value);
+}
+
+function normalizeRepairAnalysis(value) {
+  const analysis = value && typeof value === "object" ? value : {};
+
+  return {
+    itemName: String(analysis.itemName || "Unknown item"),
+    comparisonSearchQuery: String(
+      analysis.comparisonSearchQuery || analysis.itemName || ""
+    )
+      .trim()
+      .split(/\s+/)
+      .slice(0, 10)
+      .join(" "),
+    likelyIssue: String(analysis.likelyIssue || "Unknown fault"),
+    repairDifficulty: Math.round(
+      clamp(Number(analysis.repairDifficulty) || 10, 1, 10)
+    ),
+    repairRisk: Math.round(
+      clamp(Number(analysis.repairRisk) || 10, 1, 10)
+    ),
+    repairSuccessProbability: Math.round(
+      clamp(Number(analysis.repairSuccessProbability) || 0, 0, 100)
+    ),
+    partsCostLow: Math.max(Number(analysis.partsCostLow) || 0, 0),
+    partsCostHigh: Math.max(Number(analysis.partsCostHigh) || 0, 0),
+    laborHours: Math.max(Number(analysis.laborHours) || 0, 0),
+    redFlags: Array.isArray(analysis.redFlags)
+      ? analysis.redFlags.map(String).slice(0, 10)
+      : [],
+    reject: analysis.reject === true,
+    rejectReason: String(analysis.rejectReason || ""),
+    explanation: String(analysis.explanation || ""),
+  };
 }
 
 function applyDeterministicRepairRules(
