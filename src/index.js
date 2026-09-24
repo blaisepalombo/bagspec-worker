@@ -106,6 +106,7 @@ export default {
       try {
         return Response.json(await analyzeNextCandidate(env));
       } catch (error) {
+        await handleAnalysisError(env, error);
         return Response.json(
           { error: "Analysis failed", details: error.message },
           { status: 500 }
