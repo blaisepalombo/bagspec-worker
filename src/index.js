@@ -163,6 +163,17 @@ export default {
       return Response.json(stats);
     }
 
+    if (url.pathname === "/diagnostics") {
+      try {
+        return Response.json(await getDiagnostics(env));
+      } catch (error) {
+        return Response.json(
+          { error: "Diagnostics failed", details: error.message },
+          { status: 500 }
+        );
+      }
+    }
+
     if (url.pathname === "/candidates") {
       const { results } = await env.DB.prepare(`
         SELECT
@@ -965,7 +976,7 @@ async function scanListings(env) {
         SET
           completed_at = CURRENT_TIMESTAMP,
           status = 'failed',
-          error_message = ?
+          error = ?
         WHERE id = ?
       `).bind(error.message, runId).run();
     }
@@ -1042,19 +1053,62 @@ async function prefilterExisting(env) {
 
 async function runAutomatedCycle(env) {
   await ensureRuntimeTables(env);
-  const scan = await scanListings(env);
-  // Screen several category-balanced candidates with the inexpensive model.
-  // The large model is reserved for listings that already clear every BUY gate.
-  const enrichment = await enrichCandidates(env, 3);
-  const analysis = await analyzeCandidateBatch(env, 3);
-  const alerts = await sendPendingDealAlerts(env, 5);
+  const run = await env.DB.prepare(`
+    INSERT INTO cycle_runs (status) VALUES ('running')
+  `).run();
+  const cycleId = run.meta.last_row_id;
+  const result = {};
 
-  return {
-    scan,
-    enrichment,
-    analysis,
-    alerts,
-  };
+  const stages = [
+    ["scan", () => scanListings(env)],
+    ["enrichment", () => enrichCandidates(env, 3)],
+    ["analysis", () => analyzeCandidateBatch(env, 3)],
+    ["alerts", () => sendPendingDealAlerts(env, 5)],
+  ];
+
+  for (const [stage, execute] of stages) {
+    try {
+      result[stage] = await execute();
+    } catch (error) {
+      result[stage] = {
+        status: `${stage} failed`,
+        details: String(error.message || error).slice(0, 500),
+      };
+      if (stage === "analysis") {
+        await handleAnalysisError(env, error);
+      }
+    }
+  }
+
+  const errors = Object.entries(result)
+    .filter(([, value]) =>
+      /failed/i.test(value.status || "") ||
+      Number(value.failed || 0) > 0
+    )
+    .map(([stage, value]) =>
+      `${stage}: ${value.details || value.results?.find((item) => item.status === "Analysis failed")?.details || value.status}`
+    );
+
+  await env.DB.prepare(`
+    UPDATE cycle_runs
+    SET completed_at = CURRENT_TIMESTAMP,
+        status = ?,
+        summary = ?,
+        error = ?
+    WHERE id = ?
+  `).bind(
+    errors.length ? "partial_failure" : "completed",
+    JSON.stringify({
+      newListings: result.scan?.newListings || 0,
+      enriched: result.enrichment?.enriched || 0,
+      analyzed: result.analysis?.completed || 0,
+      alerted: result.alerts?.sent || 0,
+    }),
+    errors.join(" | ").slice(0, 1000) || null,
+    cycleId
+  ).run();
+
+  return result;
 }
 
 async function analyzeCandidateBatch(env, limit = 3) {
@@ -1124,6 +1178,62 @@ async function ensureRuntimeTables(env) {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `).run();
+
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS cycle_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completed_at TEXT,
+      status TEXT NOT NULL,
+      summary TEXT,
+      error TEXT
+    )
+  `).run();
+}
+
+async function getDiagnostics(env) {
+  await ensureRuntimeTables(env);
+  const [recentScans, recentCycles, queue, recentDecisions, aiUsage] =
+    await Promise.all([
+      env.DB.prepare(`
+        SELECT started_at, completed_at, status, listings_found,
+               new_listings, error
+        FROM scan_runs ORDER BY id DESC LIMIT 12
+      `).all(),
+      env.DB.prepare(`
+        SELECT started_at, completed_at, status, summary, error
+        FROM cycle_runs ORDER BY id DESC LIMIT 12
+      `).all(),
+      env.DB.prepare(`
+        SELECT category, analysis_status, recommendation,
+               COUNT(*) AS count
+        FROM listings
+        GROUP BY category, analysis_status, recommendation
+        ORDER BY category, analysis_status, recommendation
+      `).all(),
+      env.DB.prepare(`
+        SELECT category, recommendation, COUNT(*) AS count
+        FROM listings
+        WHERE analysis_status = 'complete'
+          AND first_seen_at >= datetime('now', '-24 hours')
+        GROUP BY category, recommendation
+      `).all(),
+      env.DB.prepare(`
+        SELECT usage_day, screening_calls, verification_calls
+        FROM ai_usage ORDER BY usage_day DESC LIMIT 3
+      `).all(),
+    ]);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    timeZone: "UTC",
+    recentScans: recentScans.results,
+    recentCycles: recentCycles.results,
+    queue: queue.results,
+    decisionsFromListingsFirstSeenInLast24Hours:
+      recentDecisions.results,
+    aiUsage: aiUsage.results,
+  };
 }
 
 async function recordAiUsage(env, column) {
