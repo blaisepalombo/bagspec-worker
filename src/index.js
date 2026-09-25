@@ -1090,6 +1090,9 @@ async function runAutomatedCycle(env) {
   for (const [stage, execute] of stages) {
     try {
       result[stage] = await execute();
+      if (stage === 'analysis' && result[stage].completed > 0) {
+        result.recovery = await requeueInvalidScreenings(env);
+      }
     } catch (error) {
       result[stage] = {
         status: `${stage} failed`,
@@ -1233,6 +1236,44 @@ async function ensureRuntimeTables(env) {
       error TEXT
     )
   `).run();
+}
+
+async function requeueInvalidScreenings(env) {
+  const eventKey = 'invalid-screenings-recovered-v1';
+  const existing = await env.DB.prepare(`
+    SELECT event_key FROM system_events WHERE event_key = ?
+  `).bind(eventKey).first();
+  if (existing) return { queued: 0, alreadyRecovered: true };
+
+  const result = await env.DB.prepare(`
+    UPDATE listings
+    SET status = 'candidate',
+        analysis_status = 'details_ready',
+        recommendation = 'REVIEW',
+        reasoning = NULL,
+        deal_score = 25
+    WHERE id IN (
+      SELECT id FROM (
+        SELECT id,
+          ROW_NUMBER() OVER (
+            PARTITION BY category ORDER BY first_seen_at DESC
+          ) AS category_rank
+        FROM listings
+        WHERE analysis_status = 'complete'
+          AND recommendation = 'PASS'
+          AND first_seen_at >= datetime('now', '-24 hours')
+          AND COALESCE(json_extract(reasoning, '$.comparisonSearchQuery'), '') = ''
+          AND COALESCE(json_extract(reasoning, '$.repairSuccessProbability'), 0) = 0
+          AND COALESCE(json_extract(reasoning, '$.estimatedPartsCost'), 0) = 0
+      ) WHERE category_rank <= 8 LIMIT 48
+    )
+  `).run();
+
+  await env.DB.prepare(`
+    INSERT INTO system_events (event_key) VALUES (?)
+  `).bind(eventKey).run();
+
+  return { queued: Number(result.meta?.changes || 0) };
 }
 
 async function getDiagnostics(env) {
