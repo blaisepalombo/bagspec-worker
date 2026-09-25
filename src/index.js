@@ -1334,6 +1334,7 @@ async function getDiagnostics(env) {
         SELECT title, category, recommendation, total_buy_cost,
                estimated_profit, repair_risk,
                json_extract(reasoning, '$.comparisonSearchQuery') AS comparison_query,
+               json_extract(reasoning, '$.searchQueriesTried') AS search_queries_tried,
                json_extract(reasoning, '$.comparableCount') AS comparable_count,
                json_extract(reasoning, '$.estimatedPartsCost') AS parts_cost,
                json_extract(reasoning, '$.repairSuccessProbability') AS success_probability
@@ -2265,6 +2266,7 @@ reject, rejectReason, explanation. Do not use Markdown.
 
   const financialBreakdown = {
     comparisonSearchQuery: analysis.comparisonSearchQuery,
+    searchQueriesTried: comps.searchQueriesTried || [],
     comparableCount: comps.count,
     comparableLowConfidence: comps.lowConfidence,
     comparablePriceSpread: comps.priceSpread || 0,
@@ -2660,22 +2662,9 @@ async function findWorkingComparables(
     .trim()
     .split(/\s+/)
     .filter(Boolean);
-
-  const searchQueries = [originalWords.join(" ")];
-  const lastWord = originalWords.at(-1) || "";
-  const previousWord = originalWords.at(-2) || "";
-
-  // Model suffixes are occasionally mistyped in listing titles, such as
-  // 13IKB becoming 131KB. Keep the exact search, then try the stable family
-  // model when the query already contains a numeric series identifier.
-  if (
-    originalWords.length >= 4 &&
-    /[a-z]/i.test(lastWord) &&
-    /\d/.test(lastWord) &&
-    /^\d{3,5}$/.test(previousWord)
-  ) {
-    searchQueries.push(originalWords.slice(0, -1).join(" "));
-  }
+  const searchQueries = [
+    buildComparableSearchQuery(originalWords, category),
+  ];
 
   const itemSummaries = [];
   const seenItemIds = new Set();
@@ -2748,7 +2737,9 @@ async function findWorkingComparables(
       .toLowerCase()
       .replace(/[^a-z0-9]/g, "");
 
-  const matchingQuery = searchQueries.at(-1) || searchQuery;
+  // Validate against the original configuration, even though the eBay
+  // search itself uses fewer words to retrieve enough whole devices.
+  const matchingQuery = originalWords.join(" ");
 
   const queryWords = matchingQuery
     .toLowerCase()
@@ -2761,7 +2752,10 @@ async function findWorkingComparables(
     .filter(
       (word) =>
         word.length >= 3 &&
-        /\d/.test(word)
+        /\d/.test(word) &&
+        !/^20\d{2}$/.test(word) &&
+        !/^\d+(?:gb|tb|inch|in)$/.test(word) &&
+        !/^(?:i[3579]|m[1357]|ryzen\d?|xeon)\d*[a-z0-9]*$/.test(word)
     )
     .sort((a, b) => {
       const aMixed = /[a-z]/.test(a) && /\d/.test(a) ? 1 : 0;
@@ -2774,9 +2768,9 @@ async function findWorkingComparables(
   const configurationTokens = queryWords.filter(
     (word) =>
       word !== strongestModelToken &&
-      (/^20\d{2}$/.test(word) ||
+      ((String(category).toLowerCase() !== 'game consoles' && /^20\d{2}$/.test(word)) ||
         /^\d+(?:gb|tb)$/.test(word) ||
-        /^(?:i[3579]|m[357]|ryzen\d?|xeon)\d*[a-z0-9]*$/.test(word))
+        /^(?:i[3579]|m[1357]|ryzen\d?|xeon)\d*[a-z0-9]*$/.test(word))
   );
 
   const ignoredWords = new Set([
@@ -2800,7 +2794,8 @@ async function findWorkingComparables(
   const productTokens = queryWords.filter(
     (word) =>
       word.length >= 3 &&
-      !ignoredWords.has(word)
+      !ignoredWords.has(word) &&
+      !/^(?:parts|repair|broken|notworking|ntscuc)$/.test(word)
   );
 
   const excludedTitlePattern =
@@ -2897,6 +2892,11 @@ async function findWorkingComparables(
           return false;
         }
       }
+
+      // Apple M1/M2 models can share a chassis and year with Intel models.
+      // Keep the chip generation as a required match when specified.
+      const appleChip = queryWords.find((word) => /^m[1-4]$/.test(word));
+      if (appleChip && !normalizedTitle.includes(appleChip)) return false;
 
       // If there is no usable model number, require at least
       // two meaningful product-name matches.
@@ -3003,6 +3003,21 @@ async function findWorkingComparables(
       ? 0
       : roundMoney(lowerQuartile * 0.9),
   };
+}
+
+function buildComparableSearchQuery(words, category) {
+  const clean = words.filter((word) =>
+    !/^(?:parts?|repair|broken|working|used|notebook|black|white|silver|gold|ntsc[-/]?[a-z/]*|\d+(?:-inch|inch|in))$/i.test(word)
+  );
+  const modelIndex = clean.findIndex((word, index) =>
+    index >= 2 && /[a-z]/i.test(word) && /\d/.test(word) &&
+    !/^(?:i[3579]|m[1357]|ryzen\d?|xeon)\d*/i.test(word) &&
+    !/^\d+(?:gb|tb)/i.test(word)
+  );
+  const width = modelIndex >= 0
+    ? Math.min(modelIndex + 1, 6)
+    : String(category).toLowerCase() === 'game consoles' ? 4 : 5;
+  return clean.slice(0, width).join(' ') || words.slice(0, 4).join(' ');
 }
 
 function getOutboundShippingEstimate(category) {
