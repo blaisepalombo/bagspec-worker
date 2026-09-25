@@ -1136,7 +1136,7 @@ async function analyzeCandidateBatch(env, limit = 3) {
   await ensureRuntimeTables(env);
   const paused = await env.DB.prepare(`
     SELECT created_at FROM system_events
-    WHERE event_key = 'invalid-screening-response'
+    WHERE event_key = 'invalid-screening-response-v2'
       AND created_at >= datetime('now', '-1 hour')
   `).first();
   if (paused) {
@@ -1166,7 +1166,7 @@ async function analyzeCandidateBatch(env, limit = 3) {
       if (String(error.message || '').startsWith('Invalid AI screening response')) {
         await env.DB.prepare(`
           INSERT INTO system_events (event_key, created_at)
-          VALUES ('invalid-screening-response', CURRENT_TIMESTAMP)
+          VALUES ('invalid-screening-response-v2', CURRENT_TIMESTAMP)
           ON CONFLICT(event_key) DO UPDATE SET created_at = CURRENT_TIMESTAMP
         `).run();
       }
@@ -2381,6 +2381,10 @@ Do not redo arithmetic. Return concise JSON only.
 
 function parseAiResponse(result) {
   let value = result?.response ?? result;
+
+  if (value?.choices?.[0]?.message?.content !== undefined) {
+    value = value.choices[0].message.content;
+  }
 
   if (typeof value === "object" && value !== null) {
     return value;
