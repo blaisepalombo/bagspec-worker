@@ -971,14 +971,35 @@ async function scanListings(env) {
     };
   } catch (error) {
     if (runId) {
-      await env.DB.prepare(`
-        UPDATE scan_runs
-        SET
-          completed_at = CURRENT_TIMESTAMP,
-          status = 'failed',
-          error = ?
-        WHERE id = ?
-      `).bind(error.message, runId).run();
+      try {
+        const { results: columns } = await env.DB.prepare(
+          "PRAGMA table_info(scan_runs)"
+        ).all();
+        const names = new Set(columns.map((column) => column.name));
+        const errorColumn = names.has("error")
+          ? "error"
+          : names.has("error_message")
+            ? "error_message"
+            : null;
+
+        if (errorColumn) {
+          await env.DB.prepare(`
+            UPDATE scan_runs
+            SET completed_at = CURRENT_TIMESTAMP,
+                status = 'failed',
+                ${errorColumn} = ?
+            WHERE id = ?
+          `).bind(String(error.message || error).slice(0, 1000), runId).run();
+        } else {
+          await env.DB.prepare(`
+            UPDATE scan_runs
+            SET completed_at = CURRENT_TIMESTAMP, status = 'failed'
+            WHERE id = ?
+          `).bind(runId).run();
+        }
+      } catch (logError) {
+        console.error("Could not record scan failure", logError);
+      }
     }
 
     throw error;
@@ -1196,8 +1217,7 @@ async function getDiagnostics(env) {
   const [recentScans, recentCycles, queue, recentDecisions, aiUsage] =
     await Promise.all([
       env.DB.prepare(`
-        SELECT started_at, completed_at, status, listings_found,
-               new_listings, error
+        SELECT *
         FROM scan_runs ORDER BY id DESC LIMIT 12
       `).all(),
       env.DB.prepare(`
@@ -1227,7 +1247,14 @@ async function getDiagnostics(env) {
   return {
     generatedAt: new Date().toISOString(),
     timeZone: "UTC",
-    recentScans: recentScans.results,
+    recentScans: recentScans.results.map((scan) => ({
+      started_at: scan.started_at,
+      completed_at: scan.completed_at,
+      status: scan.status,
+      listings_found: scan.listings_found,
+      new_listings: scan.new_listings,
+      error: scan.error ?? scan.error_message ?? null,
+    })),
     recentCycles: recentCycles.results,
     queue: queue.results,
     decisionsFromListingsFirstSeenInLast24Hours:
