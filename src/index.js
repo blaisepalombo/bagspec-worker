@@ -2675,7 +2675,7 @@ async function findWorkingComparables(
     );
 
     searchUrl.searchParams.set("q", query);
-    searchUrl.searchParams.set("limit", "50");
+    searchUrl.searchParams.set("limit", "100");
     searchUrl.searchParams.set("sort", "price");
 
     if (categoryProfile?.ebayCategoryId) {
@@ -3009,14 +3009,18 @@ function buildComparableSearchQuery(words, category) {
   const clean = words.filter((word) =>
     !/^(?:parts?|repair|broken|working|used|notebook|black|white|silver|gold|ntsc[-/]?[a-z/]*|\d+(?:-inch|inch|in))$/i.test(word)
   );
+  const isGameConsole = String(category).toLowerCase() === 'game consoles';
   const modelIndex = clean.findIndex((word, index) =>
-    index >= 2 && /[a-z]/i.test(word) && /\d/.test(word) &&
-    !/^(?:i[3579]|m[1357]|ryzen\d?|xeon)\d*/i.test(word) &&
-    !/^\d+(?:gb|tb)/i.test(word)
+    index >= 1 &&
+    ((/[a-z]/i.test(word) && /\d/.test(word) &&
+      !/^(?:i[3579]|m[1357]|ryzen\d?|xeon)\d*/i.test(word) &&
+      !/^\d+(?:gb|tb)/i.test(word)) ||
+      (!isGameConsole && index >= 2 && /^\d{4,5}$/.test(word) &&
+        !/^20\d{2}$/.test(word)))
   );
   const width = modelIndex >= 0
     ? Math.min(modelIndex + 1, 6)
-    : String(category).toLowerCase() === 'game consoles' ? 4 : 5;
+    : isGameConsole ? 4 : 5;
   return clean.slice(0, width).join(' ') || words.slice(0, 4).join(' ');
 }
 
