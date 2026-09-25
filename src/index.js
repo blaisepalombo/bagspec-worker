@@ -1256,7 +1256,7 @@ async function requeueInvalidScreenings(env) {
 async function getDiagnostics(env) {
   await ensureRuntimeTables(env);
   const [recentScans, recentCycles, queue, recentDecisions, aiUsage,
-    passReasons, nearMisses] =
+    passReasons, nearMisses, validScreens] =
     await Promise.all([
       env.DB.prepare(`
         SELECT *
@@ -1330,6 +1330,18 @@ async function getDiagnostics(env) {
         ORDER BY estimated_profit DESC, roi_percent DESC
         LIMIT 10
       `).all(),
+      env.DB.prepare(`
+        SELECT title, category, recommendation, total_buy_cost,
+               estimated_profit, repair_risk,
+               json_extract(reasoning, '$.comparisonSearchQuery') AS comparison_query,
+               json_extract(reasoning, '$.comparableCount') AS comparable_count,
+               json_extract(reasoning, '$.estimatedPartsCost') AS parts_cost,
+               json_extract(reasoning, '$.repairSuccessProbability') AS success_probability
+        FROM listings
+        WHERE analysis_status = 'complete'
+          AND COALESCE(json_extract(reasoning, '$.comparisonSearchQuery'), '') <> ''
+        ORDER BY id DESC LIMIT 8
+      `).all(),
     ]);
 
   return {
@@ -1350,6 +1362,7 @@ async function getDiagnostics(env) {
     aiUsage: aiUsage.results,
     passReasonsLast24Hours: passReasons.results,
     closestPassesLast24Hours: nearMisses.results,
+    recentScreeningsWithRealQueries: validScreens.results,
   };
 }
 
