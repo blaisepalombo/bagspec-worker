@@ -1214,7 +1214,8 @@ async function ensureRuntimeTables(env) {
 
 async function getDiagnostics(env) {
   await ensureRuntimeTables(env);
-  const [recentScans, recentCycles, queue, recentDecisions, aiUsage] =
+  const [recentScans, recentCycles, queue, recentDecisions, aiUsage,
+    passReasons, nearMisses] =
     await Promise.all([
       env.DB.prepare(`
         SELECT *
@@ -1242,6 +1243,52 @@ async function getDiagnostics(env) {
         SELECT usage_day, screening_calls, verification_calls
         FROM ai_usage ORDER BY usage_day DESC LIMIT 3
       `).all(),
+      env.DB.prepare(`
+        SELECT category,
+          CASE
+            WHEN COALESCE(json_extract(reasoning, '$.rejectReason'), '') <> ''
+              THEN 'AI rejected repair'
+            WHEN COALESCE(json_extract(reasoning, '$.comparableCount'), 0) < 3
+              THEN 'Too few working comparables'
+            WHEN json_extract(reasoning, '$.comparableLowConfidence') = 1
+              THEN 'Uncertain comparable prices'
+            WHEN COALESCE(json_extract(reasoning, '$.estimatedProfit'), 0) <
+              CASE WHEN category IN ('Mini PCs', 'Game Consoles', 'Premium Audio', 'Label Printers')
+                THEN 40 ELSE 50 END
+              THEN 'Profit below BUY minimum'
+            WHEN COALESCE(json_extract(reasoning, '$.roiPercent'), 0) <
+              CASE WHEN category IN ('Mini PCs', 'Game Consoles', 'Premium Audio', 'Label Printers')
+                THEN 45 ELSE 50 END
+              THEN 'ROI below BUY minimum'
+            WHEN COALESCE(json_extract(reasoning, '$.repairSuccessProbability'), 0) < 70
+              THEN 'Repair probability below BUY minimum'
+            WHEN COALESCE(json_extract(reasoning, '$.repairRisk'), 10) > 6
+              THEN 'Repair risk above BUY maximum'
+            ELSE 'Other decision gate'
+          END AS reason,
+          COUNT(*) AS count
+        FROM listings
+        WHERE analysis_status = 'complete'
+          AND recommendation = 'PASS'
+          AND first_seen_at >= datetime('now', '-24 hours')
+        GROUP BY category, reason
+        ORDER BY count DESC
+      `).all(),
+      env.DB.prepare(`
+        SELECT title, category, total_buy_cost, estimated_profit,
+               roi_percent, repair_risk,
+               json_extract(reasoning, '$.comparableCount') AS comparable_count,
+               json_extract(reasoning, '$.comparisonSearchQuery') AS comparison_query,
+               json_extract(reasoning, '$.estimatedPartsCost') AS parts_cost,
+               json_extract(reasoning, '$.repairSuccessProbability') AS success_probability,
+               json_extract(reasoning, '$.rejectReason') AS reject_reason
+        FROM listings
+        WHERE analysis_status = 'complete'
+          AND recommendation = 'PASS'
+          AND first_seen_at >= datetime('now', '-24 hours')
+        ORDER BY estimated_profit DESC, roi_percent DESC
+        LIMIT 10
+      `).all(),
     ]);
 
   return {
@@ -1260,6 +1307,8 @@ async function getDiagnostics(env) {
     decisionsFromListingsFirstSeenInLast24Hours:
       recentDecisions.results,
     aiUsage: aiUsage.results,
+    passReasonsLast24Hours: passReasons.results,
+    closestPassesLast24Hours: nearMisses.results,
   };
 }
 
