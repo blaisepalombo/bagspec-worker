@@ -1136,22 +1136,6 @@ async function runAutomatedCycle(env) {
 }
 
 async function analyzeCandidateBatch(env, limit = 3) {
-  await ensureRuntimeTables(env);
-  const paused = await env.DB.prepare(`
-    SELECT created_at FROM system_events
-    WHERE event_key = 'invalid-screening-response-v3'
-      AND created_at >= datetime('now', '-1 hour')
-  `).first();
-  if (paused) {
-    return {
-      status: 'AI screening paused after an invalid response',
-      attempted: 0,
-      completed: 0,
-      filtered: 0,
-      failed: 0,
-      results: [],
-    };
-  }
   const safeLimit = Math.min(
     Math.max(Number(limit) || 3, 1),
     5
@@ -1166,13 +1150,6 @@ async function analyzeCandidateBatch(env, limit = 3) {
       result = await analyzeNextCandidate(env, usedCategories);
     } catch (error) {
       await handleAnalysisError(env, error);
-      if (String(error.message || '').startsWith('Invalid AI screening response')) {
-        await env.DB.prepare(`
-          INSERT INTO system_events (event_key, created_at)
-          VALUES ('invalid-screening-response-v3', CURRENT_TIMESTAMP)
-          ON CONFLICT(event_key) DO UPDATE SET created_at = CURRENT_TIMESTAMP
-        `).run();
-      }
       results.push({
         status: "Analysis failed",
         details: error.message,
@@ -1981,6 +1958,9 @@ generation, processor tier, RAM, or storage capacity needed to avoid mixing
 materially different versions. Use 3 to 10 words. Do not include condition or
 marketplace words such as used, broken, parts, repair, working, or eBay.
 
+repairDifficulty and repairRisk must be numbers from 1 to 10. Do not add
+words or explanations to either number. For example, use 5, not "Moderate",
+and use 8, not "8 - high risk".
 Repair success probability must be an integer percentage from 0 to 100.
 For example, 80 means an 80 percent probability, not 0.80.
 
@@ -2023,11 +2003,25 @@ reject, rejectReason, explanation. Do not use Markdown.
 
   await recordAiUsage(env, "screening_calls");
 
-  const analysis = applyDeterministicRepairRules(
-    normalizeRepairAnalysis(validateRepairAnalysis(parseAiResponse(aiResult))),
-    listing,
-    savedDetails
-  );
+  let analysis;
+  try {
+    analysis = applyDeterministicRepairRules(
+      normalizeRepairAnalysis(validateRepairAnalysis(parseAiResponse(aiResult))),
+      listing,
+      savedDetails
+    );
+  } catch (error) {
+    await env.DB.prepare(`
+      UPDATE listings
+      SET analysis_status = 'needs_review',
+          reasoning = ?
+      WHERE id = ?
+    `).bind(JSON.stringify({
+      error: 'AI screening response could not be trusted',
+      details: String(error.message || error).slice(0, 800),
+    }), listing.id).run();
+    throw error;
+  }
 
   let comps = {
     count: 0,
@@ -2502,11 +2496,19 @@ function parseRepairScore(value) {
   const label = String(value ?? '').trim().toLowerCase();
   if (Object.hasOwn(labels, label)) return labels[label];
   if (!label) return NaN;
-  const numeric = Number(label.replace(/%$/, ''));
+  const riskWarning = /\b(liquid|water damage|corrosion|locked|board failure|high risk|severe)\b/.test(label);
+  const leadingLabel = label.match(/^(easy|low|simple|moderate|medium|difficult|hard|high|severe)\b/);
+  if (leadingLabel) {
+    return riskWarning ? Math.max(8, labels[leadingLabel[1]]) : labels[leadingLabel[1]];
+  }
+  const leadingNumber = label.match(/^(\d+(?:\.\d+)?)\s*(?:%|\b|\s*-)/);
+  if (!leadingNumber) return NaN;
+  const numeric = Number(leadingNumber[1]);
   if (!Number.isFinite(numeric) || numeric < 1) return NaN;
-  if (numeric <= 10) return numeric;
-  if (numeric <= 100) return Math.ceil(numeric / 10);
-  return NaN;
+  const score = numeric <= 10 ? numeric :
+    numeric <= 100 ? Math.ceil(numeric / 10) : NaN;
+  if (riskWarning) return Math.max(8, score);
+  return score;
 }
 
 function normalizeRepairAnalysis(value) {
