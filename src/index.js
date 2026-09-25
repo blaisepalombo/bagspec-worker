@@ -1139,7 +1139,7 @@ async function analyzeCandidateBatch(env, limit = 3) {
   await ensureRuntimeTables(env);
   const paused = await env.DB.prepare(`
     SELECT created_at FROM system_events
-    WHERE event_key = 'invalid-screening-response-v2'
+    WHERE event_key = 'invalid-screening-response-v3'
       AND created_at >= datetime('now', '-1 hour')
   `).first();
   if (paused) {
@@ -1169,7 +1169,7 @@ async function analyzeCandidateBatch(env, limit = 3) {
       if (String(error.message || '').startsWith('Invalid AI screening response')) {
         await env.DB.prepare(`
           INSERT INTO system_events (event_key, created_at)
-          VALUES ('invalid-screening-response-v2', CURRENT_TIMESTAMP)
+          VALUES ('invalid-screening-response-v3', CURRENT_TIMESTAMP)
           ON CONFLICT(event_key) DO UPDATE SET created_at = CURRENT_TIMESTAMP
         `).run();
       }
@@ -2463,10 +2463,14 @@ function validateRepairAnalysis(value) {
     (value.reject === true
       ? validText('rejectReason')
       : validText('comparisonSearchQuery') && validText('likelyIssue') &&
-        validNumber('repairDifficulty') && validNumber('repairRisk') &&
+        Number.isFinite(parseRepairScore(value.repairDifficulty)) &&
+        Number.isFinite(parseRepairScore(value.repairRisk)) &&
         validNumber('repairSuccessProbability') &&
         validNumber('partsCostHigh') &&
-        Number(value.repairRisk) >= 1 && Number(value.repairRisk) <= 10 &&
+        parseRepairScore(value.repairDifficulty) >= 1 &&
+        parseRepairScore(value.repairDifficulty) <= 10 &&
+        parseRepairScore(value.repairRisk) >= 1 &&
+        parseRepairScore(value.repairRisk) <= 10 &&
         Number(value.repairSuccessProbability) >= 0 &&
         Number(value.repairSuccessProbability) <= 100 &&
         Number(value.partsCostHigh) >= 0);
@@ -2483,6 +2487,28 @@ function validateRepairAnalysis(value) {
   return value;
 }
 
+function parseRepairScore(value) {
+  const labels = {
+    easy: 2,
+    low: 2,
+    simple: 2,
+    moderate: 5,
+    medium: 5,
+    difficult: 8,
+    hard: 8,
+    high: 8,
+    severe: 10,
+  };
+  const label = String(value ?? '').trim().toLowerCase();
+  if (Object.hasOwn(labels, label)) return labels[label];
+  if (!label) return NaN;
+  const numeric = Number(label.replace(/%$/, ''));
+  if (!Number.isFinite(numeric) || numeric < 1) return NaN;
+  if (numeric <= 10) return numeric;
+  if (numeric <= 100) return Math.ceil(numeric / 10);
+  return NaN;
+}
+
 function normalizeRepairAnalysis(value) {
   const analysis = value && typeof value === "object" ? value : {};
 
@@ -2497,10 +2523,10 @@ function normalizeRepairAnalysis(value) {
       .join(" "),
     likelyIssue: String(analysis.likelyIssue || "Unknown fault"),
     repairDifficulty: Math.round(
-      clamp(Number(analysis.repairDifficulty) || 10, 1, 10)
+      clamp(parseRepairScore(analysis.repairDifficulty), 1, 10)
     ),
     repairRisk: Math.round(
-      clamp(Number(analysis.repairRisk) || 10, 1, 10)
+      clamp(parseRepairScore(analysis.repairRisk), 1, 10)
     ),
     repairSuccessProbability: Math.round(
       clamp(Number(analysis.repairSuccessProbability) || 0, 0, 100)
