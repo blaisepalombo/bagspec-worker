@@ -1133,6 +1133,22 @@ async function runAutomatedCycle(env) {
 }
 
 async function analyzeCandidateBatch(env, limit = 3) {
+  await ensureRuntimeTables(env);
+  const paused = await env.DB.prepare(`
+    SELECT created_at FROM system_events
+    WHERE event_key = 'invalid-screening-response'
+      AND created_at >= datetime('now', '-1 hour')
+  `).first();
+  if (paused) {
+    return {
+      status: 'AI screening paused after an invalid response',
+      attempted: 0,
+      completed: 0,
+      filtered: 0,
+      failed: 0,
+      results: [],
+    };
+  }
   const safeLimit = Math.min(
     Math.max(Number(limit) || 3, 1),
     5
@@ -1147,6 +1163,13 @@ async function analyzeCandidateBatch(env, limit = 3) {
       result = await analyzeNextCandidate(env, usedCategories);
     } catch (error) {
       await handleAnalysisError(env, error);
+      if (String(error.message || '').startsWith('Invalid AI screening response')) {
+        await env.DB.prepare(`
+          INSERT INTO system_events (event_key, created_at)
+          VALUES ('invalid-screening-response', CURRENT_TIMESTAMP)
+          ON CONFLICT(event_key) DO UPDATE SET created_at = CURRENT_TIMESTAMP
+        `).run();
+      }
       results.push({
         status: "Analysis failed",
         details: error.message,
@@ -1953,14 +1976,14 @@ reject, rejectReason, explanation. Do not use Markdown.
         },
       ],
       temperature: 0.1,
-      max_tokens: 450,
+      max_tokens: 650,
     }
   );
 
   await recordAiUsage(env, "screening_calls");
 
   const analysis = applyDeterministicRepairRules(
-    normalizeRepairAnalysis(parseAiResponse(aiResult)),
+    normalizeRepairAnalysis(validateRepairAnalysis(parseAiResponse(aiResult))),
     listing,
     savedDetails
   );
@@ -2381,6 +2404,38 @@ function parseAiResponse(result) {
   }
 
   return JSON.parse(value);
+}
+
+function validateRepairAnalysis(value) {
+  const validNumber = (key) =>
+    value?.[key] !== null && value?.[key] !== undefined &&
+    value?.[key] !== '' && Number.isFinite(Number(value[key]));
+  const validText = (key) =>
+    typeof value?.[key] === 'string' && value[key].trim().length > 0;
+  const valid = value && typeof value === 'object' &&
+    !Array.isArray(value) &&
+    typeof value.reject === 'boolean' &&
+    (value.reject === true
+      ? validText('rejectReason')
+      : validText('comparisonSearchQuery') && validText('likelyIssue') &&
+        validNumber('repairDifficulty') && validNumber('repairRisk') &&
+        validNumber('repairSuccessProbability') &&
+        validNumber('partsCostHigh') &&
+        Number(value.repairRisk) >= 1 && Number(value.repairRisk) <= 10 &&
+        Number(value.repairSuccessProbability) >= 0 &&
+        Number(value.repairSuccessProbability) <= 100 &&
+        Number(value.partsCostHigh) >= 0);
+
+  if (!valid) {
+    const shape = value && typeof value === 'object'
+      ? Object.keys(value).slice(0, 18).join(',')
+      : typeof value;
+    const preview = JSON.stringify(value).slice(0, 350);
+    throw new Error(
+      `Invalid AI screening response; keys: ${shape}; sample: ${preview}`
+    );
+  }
+  return value;
 }
 
 function normalizeRepairAnalysis(value) {
