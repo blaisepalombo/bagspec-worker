@@ -357,6 +357,45 @@ const V2_SEARCHES = [
   [106, "Label Printers", "label printer", "25348", 220],
 ];
 
+// Keep the existing search records: /setup-v2 does not need to be rerun.
+// Rotate model-specific terms across scans to reach items whose titles omit
+// generic words such as "console" or "speaker".
+const SEARCH_TERMS = {
+  "Mini PCs": ["mini pc", "nuc", "optiplex micro", "thinkcentre tiny"],
+  "Game Consoles": ["console", "playstation", "xbox", "nintendo switch", "steam deck"],
+  Projectors: ["projector", "epson projector", "benq projector"],
+  "Premium Audio": ["speaker", "sonos", "soundlink", "soundbar"],
+  "Label Printers": ["label printer", "zebra printer", "dymo labelwriter", "rollo printer"],
+};
+const FRESH_LISTING_HOURS = 6;
+
+function getSearchTerm(search, scanSlot) {
+  const category = search.profile_key || search.category || search.name;
+  const terms = SEARCH_TERMS[category];
+  return terms ? terms[scanSlot % terms.length] : search.query;
+}
+
+function getSellerEvidence(listing, details = {}) {
+  return [listing.title, listing.condition, details.shortDescription,
+    details.conditionDescription, details.fullDescription]
+    .filter(Boolean).join(" ").replace(/<[^>]*>/g, " ")
+    .replace(/&(?:nbsp|amp|quot|#39);/gi, " ").toLowerCase();
+}
+
+function getSellerRejectReason(listing, details = {}) {
+  const text = getSellerEvidence(listing, details);
+  if (/\b(?:liquid damage|water damage|corrosion|burnt board|burned board|icloud locked|activation locked|mdm locked|bios password|computrace)\b/.test(text))
+    return "Seller reports liquid/board damage or a device lock";
+  if (/\b(?:(?:damaged|broken|cracked|shattered|nonworking)\s+(?:lcd|screen|display|panel)|(?:lcd|screen|display|panel)\s+(?:is\s+)?(?:damaged|broken|cracked|shattered|nonworking))\b/.test(text))
+    return "Seller reports display damage; simple-parts repair estimate is unreliable";
+  if (/\b(?:does not|doesn't|will not|won't|cannot|can't|unable to|fails to)\s+(?:boot|power on|turn on)|\bno power\b|\bdead motherboard\b/.test(text))
+    return "Seller reports no boot/power; the fault is unverified";
+  if (listing.category === "Business Laptops" &&
+      /\b(?:thinkpad\s+[rtx]6[01]|core\s*2\s*duo|pentium\s*[34]|celeron\s*m)\b/.test(text))
+    return "Vintage laptop has insufficient resale room for this repair workflow";
+  return null;
+}
+
 function getCategoryProfile(category) {
   return CATEGORY_PROFILES[category] || null;
 }
@@ -833,13 +872,14 @@ async function scanListings(env) {
     let newListings = 0;
     let olderOrUndatedIgnored = 0;
 
+    const scanSlot = Math.floor(Date.now() / (5 * 60 * 1000));
     for (const search of searches) {
       const ebayUrl = new URL(
         "https://api.ebay.com/buy/browse/v1/item_summary/search"
       );
 
-      ebayUrl.searchParams.set("q", search.query);
-      ebayUrl.searchParams.set("limit", "20");
+      ebayUrl.searchParams.set("q", getSearchTerm(search, scanSlot));
+      ebayUrl.searchParams.set("limit", "100");
       ebayUrl.searchParams.set("sort", "newlyListed");
 
       if (search.category_id) {
@@ -875,7 +915,7 @@ async function scanListings(env) {
       const recentItems = items.filter((item) => {
         const postedAt = Date.parse(item.itemCreationDate || "");
         const isRecent = Number.isFinite(postedAt) &&
-          postedAt <= Date.now() && postedAt >= Date.now() - 24 * 60 * 60 * 1000;
+          postedAt <= Date.now() && postedAt >= Date.now() - FRESH_LISTING_HOURS * 60 * 60 * 1000;
         if (!isRecent) olderOrUndatedIgnored += 1;
         return isRecent;
       });
@@ -1626,8 +1666,8 @@ async function sendPendingDealAlerts(env, limit = 3) {
     WHERE
       recommendation = 'BUY'
       AND alerted_at IS NULL
-      AND item_creation_date >= datetime('now', '-24 hours')
-    ORDER BY deal_score DESC, first_seen_at ASC
+      AND item_creation_date >= datetime('now', '-6 hours')
+    ORDER BY item_creation_date DESC, deal_score DESC
     LIMIT ?
   `).bind(safeLimit).all();
 
@@ -1636,6 +1676,20 @@ async function sendPendingDealAlerts(env, limit = 3) {
 
   for (const listing of listings) {
     try {
+      let details = {};
+      try {
+        details = JSON.parse(listing.description || "{}");
+      } catch {
+        details = { shortDescription: listing.description || "" };
+      }
+      const rejectReason = getSellerRejectReason(listing, details);
+      if (rejectReason) {
+        await env.DB.prepare(`
+          UPDATE listings SET status = 'rejected', analysis_status = 'filtered',
+            deal_score = 0, recommendation = 'PASS', reasoning = ? WHERE id = ?
+        `).bind(rejectReason, listing.id).run();
+        continue;
+      }
       await postDiscordWebhook(
         env,
         buildDiscordDealPayload(listing)
@@ -1678,7 +1732,7 @@ async function enrichCandidates(env, limit = 10) {
     WHERE
       status = 'candidate'
       AND analysis_status = 'awaiting_details'
-      AND item_creation_date >= datetime('now', '-24 hours')
+      AND item_creation_date >= datetime('now', '-6 hours')
     ORDER BY
       deal_score + CASE
         WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
@@ -1751,6 +1805,7 @@ async function enrichCandidates(env, limit = 10) {
         const savedDetails = {
           shortDescription: item.shortDescription || "",
           conditionDescription: item.conditionDescription || "",
+          fullDescription: String(item.description || "").slice(0, 12000),
           itemSpecifics,
           buyingOptions: item.buyingOptions || [],
           shippingDetails,
@@ -1886,7 +1941,7 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     WHERE
       status = 'candidate'
       AND analysis_status = 'details_ready'
-      AND item_creation_date >= datetime('now', '-24 hours')
+      AND item_creation_date >= datetime('now', '-6 hours')
       ${exclusionSql}
     ORDER BY
       deal_score + CASE
@@ -1905,7 +1960,7 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
       WHERE
         status = 'candidate'
         AND analysis_status = 'details_ready'
-        AND item_creation_date >= datetime('now', '-24 hours')
+        AND item_creation_date >= datetime('now', '-6 hours')
       ORDER BY
         deal_score + CASE
           WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
@@ -1959,6 +2014,19 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
   } catch {
     savedDetails = {
       shortDescription: listing.description || "",
+    };
+  }
+
+  const sellerRejectReason = getSellerRejectReason(listing, savedDetails);
+  if (sellerRejectReason) {
+    await env.DB.prepare(`
+      UPDATE listings SET status = 'rejected', analysis_status = 'filtered',
+        deal_score = 0, recommendation = 'PASS', reasoning = ? WHERE id = ?
+    `).bind(sellerRejectReason, listing.id).run();
+    return {
+      status: "Listing rejected before analysis",
+      listing: { title: listing.title, link: listing.item_url, category: listing.category },
+      reason: sellerRejectReason,
     };
   }
 
@@ -2645,6 +2713,7 @@ function applyDeterministicRepairRules(
     listing.condition,
     savedDetails.shortDescription,
     savedDetails.conditionDescription,
+    savedDetails.fullDescription,
   ]
     .filter(Boolean)
     .join(" ")
