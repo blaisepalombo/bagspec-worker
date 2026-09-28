@@ -812,6 +812,7 @@ async function scanListings(env) {
   let runId;
 
   try {
+    await ensureRuntimeTables(env);
     const runResult = await env.DB.prepare(`
       INSERT INTO scan_runs (status)
       VALUES ('running')
@@ -830,6 +831,7 @@ async function scanListings(env) {
 
     let listingsFound = 0;
     let newListings = 0;
+    let olderOrUndatedIgnored = 0;
 
     for (const search of searches) {
       const ebayUrl = new URL(
@@ -870,8 +872,16 @@ async function scanListings(env) {
 
       listingsFound += items.length;
 
-      if (items.length > 0) {
-        const statements = items.map((item) => {
+      const recentItems = items.filter((item) => {
+        const postedAt = Date.parse(item.itemCreationDate || "");
+        const isRecent = Number.isFinite(postedAt) &&
+          postedAt <= Date.now() && postedAt >= Date.now() - 24 * 60 * 60 * 1000;
+        if (!isRecent) olderOrUndatedIgnored += 1;
+        return isRecent;
+      });
+
+      if (recentItems.length > 0) {
+        const statements = recentItems.map((item) => {
           const price = Number(item.price?.value || 0);
 
       const shippingValues = (item.shippingOptions || [])
@@ -909,13 +919,14 @@ async function scanListings(env) {
               estimated_tax,
               total_buy_cost,
               item_end_date,
+              item_creation_date,
               status,
               analysis_status,
               deal_score,
               recommendation,
               reasoning
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).bind(
             item.itemId,
             item.title || "Untitled eBay listing",
@@ -928,6 +939,7 @@ async function scanListings(env) {
             estimatedTax,
             totalBuyCost,
             item.itemEndDate || null,
+            new Date(item.itemCreationDate).toISOString().replace("T", " ").slice(0, 19),
             classification.status,
             classification.analysisStatus,
             classification.score,
@@ -967,7 +979,8 @@ async function scanListings(env) {
       searchesRun: searches.length,
       listingsFound,
       newListings,
-      duplicatesIgnored: listingsFound - newListings,
+      duplicatesIgnored: listingsFound - newListings - olderOrUndatedIgnored,
+      olderOrUndatedIgnored,
     };
   } catch (error) {
     if (runId) {
@@ -1188,6 +1201,14 @@ async function analyzeCandidateBatch(env, limit = 3) {
 }
 
 async function ensureRuntimeTables(env) {
+  const { results: listingColumns } = await env.DB.prepare(
+    "PRAGMA table_info(listings)"
+  ).all();
+  if (!listingColumns.some((column) => column.name === "item_creation_date")) {
+    await env.DB.prepare(
+      "ALTER TABLE listings ADD COLUMN item_creation_date TEXT"
+    ).run();
+  }
   await env.DB.prepare(`
     CREATE TABLE IF NOT EXISTS ai_usage (
       usage_day TEXT PRIMARY KEY,
@@ -1605,6 +1626,7 @@ async function sendPendingDealAlerts(env, limit = 3) {
     WHERE
       recommendation = 'BUY'
       AND alerted_at IS NULL
+      AND item_creation_date >= datetime('now', '-24 hours')
     ORDER BY deal_score DESC, first_seen_at ASC
     LIMIT ?
   `).bind(safeLimit).all();
@@ -1651,19 +1673,20 @@ async function enrichCandidates(env, limit = 10) {
   );
 
   const { results: rankedListings } = await env.DB.prepare(`
-    SELECT id, ebay_item_id, title, category, deal_score, first_seen_at
+    SELECT id, ebay_item_id, title, category, deal_score, first_seen_at, item_creation_date
     FROM listings
     WHERE
       status = 'candidate'
       AND analysis_status = 'awaiting_details'
+      AND item_creation_date >= datetime('now', '-24 hours')
     ORDER BY
       deal_score + CASE
-        WHEN first_seen_at >= datetime('now', '-1 hour') THEN 12
-        WHEN first_seen_at >= datetime('now', '-6 hours') THEN 6
+        WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
+        WHEN item_creation_date >= datetime('now', '-6 hours') THEN 8
         ELSE 0
       END DESC,
-      first_seen_at DESC
-    LIMIT 60
+      item_creation_date DESC
+    LIMIT 180
   `).all();
 
   const listings = selectCategoryBalancedListings(
@@ -1822,20 +1845,17 @@ async function enrichCandidates(env, limit = 10) {
 function selectCategoryBalancedListings(listings, limit) {
   const selected = [];
   const selectedIds = new Set();
-  const usedCategories = new Set();
+  const categoryOrder = V2_SEARCHES.map(([, category]) => category);
+  const offset = Math.floor(Date.now() / 300000) % categoryOrder.length;
+  const rotated = categoryOrder.slice(offset).concat(categoryOrder.slice(0, offset));
 
-  for (const listing of listings) {
-    const category = listing.category || "Uncategorized";
-
-    if (!usedCategories.has(category)) {
+  for (const category of rotated) {
+    const listing = listings.find((candidate) => candidate.category === category);
+    if (listing && !selectedIds.has(listing.id)) {
       selected.push(listing);
       selectedIds.add(listing.id);
-      usedCategories.add(category);
     }
-
-    if (selected.length >= limit) {
-      return selected;
-    }
+    if (selected.length >= limit) return selected;
   }
 
   for (const listing of listings) {
@@ -1860,40 +1880,44 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     ? `AND category NOT IN (${exclusions.map(() => "?").join(", ")})`
     : "";
 
-  let listing = await env.DB.prepare(`
+  let { results: rankedListings } = await env.DB.prepare(`
     SELECT *
     FROM listings
     WHERE
       status = 'candidate'
       AND analysis_status = 'details_ready'
+      AND item_creation_date >= datetime('now', '-24 hours')
       ${exclusionSql}
     ORDER BY
       deal_score + CASE
-        WHEN first_seen_at >= datetime('now', '-1 hour') THEN 12
-        WHEN first_seen_at >= datetime('now', '-6 hours') THEN 6
+        WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
+        WHEN item_creation_date >= datetime('now', '-6 hours') THEN 8
         ELSE 0
       END DESC,
-      first_seen_at DESC
-    LIMIT 1
-  `).bind(...exclusions).first();
+      item_creation_date DESC
+    LIMIT 180
+  `).bind(...exclusions).all();
 
-  if (!listing && exclusions.length > 0) {
-    listing = await env.DB.prepare(`
+  if (!rankedListings.length && exclusions.length > 0) {
+    ({ results: rankedListings } = await env.DB.prepare(`
       SELECT *
       FROM listings
       WHERE
         status = 'candidate'
         AND analysis_status = 'details_ready'
+        AND item_creation_date >= datetime('now', '-24 hours')
       ORDER BY
         deal_score + CASE
-          WHEN first_seen_at >= datetime('now', '-1 hour') THEN 12
-          WHEN first_seen_at >= datetime('now', '-6 hours') THEN 6
+          WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
+          WHEN item_creation_date >= datetime('now', '-6 hours') THEN 8
           ELSE 0
         END DESC,
-        first_seen_at DESC
-      LIMIT 1
-    `).first();
+        item_creation_date DESC
+      LIMIT 180
+    `).all());
   }
+
+  const listing = selectCategoryBalancedListings(rankedListings, 1)[0];
 
   if (!listing) {
     return {
@@ -1935,6 +1959,20 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
   } catch {
     savedDetails = {
       shortDescription: listing.description || "",
+    };
+  }
+
+  const laptopModel = getVerifiedLaptopModel(listing, savedDetails);
+  if (isLaptopCategory(listing.category) && !laptopModel) {
+    const reason = "Exact laptop model is not stated by the seller; resale comparables cannot be trusted";
+    await env.DB.prepare(`
+      UPDATE listings SET status = 'rejected', analysis_status = 'filtered',
+        deal_score = 0, recommendation = 'PASS', reasoning = ? WHERE id = ?
+    `).bind(reason, listing.id).run();
+    return {
+      status: "Listing rejected before analysis",
+      listing: { title: listing.title, link: listing.item_url, category: listing.category },
+      reason,
     };
   }
 
@@ -2044,11 +2082,17 @@ reject, rejectReason, explanation. Do not use Markdown.
     lowConfidence: true,
   };
 
+  if (laptopModel && !normalizeModelText(analysis.comparisonSearchQuery).includes(laptopModel)) {
+    analysis.reject = true;
+    analysis.rejectReason = "AI comparison query omitted the seller-stated laptop model";
+  }
+
   if (!analysis.reject && analysis.comparisonSearchQuery) {
     comps = await findWorkingComparables(
       env,
       analysis.comparisonSearchQuery,
-      listing.category
+      listing.category,
+      laptopModel
     );
   }
 
@@ -2560,6 +2604,37 @@ function normalizeRepairAnalysis(value) {
   };
 }
 
+function isLaptopCategory(category) {
+  return category === "Business Laptops" || category === "Laptops";
+}
+
+function normalizeModelText(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function getVerifiedLaptopModel(listing, savedDetails) {
+  if (!isLaptopCategory(listing.category)) return null;
+  const aspects = savedDetails.itemSpecifics || {};
+  const sellerModel = Object.entries(aspects).find(([key]) => key.toLowerCase() === "model")?.[1];
+  const family = /\b(?:latitude|inspiron|precision|vostro|xps|alienware|thinkpad|ideapad|yoga|elitebook|probook|zbook|envy|spectre|pavilion|macbook|aspire|swift|nitro|zenbook|vivobook|surface)\b/i;
+  for (const source of [listing.title, sellerModel]) {
+    const text = String(source || "");
+    const match = family.exec(text);
+    if (!match) continue;
+    const context = text.slice(match.index + match[0].length, match.index + match[0].length + 32);
+    const tokens = context.match(/\b(?:[a-z]{1,4}\d{2,5}[a-z0-9-]*|\d{3,5}[a-z0-9-]*)\b/gi) || [];
+    const valid = tokens.filter((token) =>
+      !/^20\d{2}$/.test(token) &&
+      !/^x360$/i.test(token) &&
+      !/^(?:i[3579]|m[1357]|ryzen\d?|xeon)\d*[a-z0-9-]*$/i.test(token) &&
+      !/^\d+(?:gb|tb|mhz|ghz|wh)$/i.test(token) &&
+      !/^win\d+$/i.test(token)
+    );
+    if (valid.length) return normalizeModelText(valid[0]);
+  }
+  return null;
+}
+
 function applyDeterministicRepairRules(
   analysis,
   listing,
@@ -2590,6 +2665,9 @@ function applyDeterministicRepairRules(
     /\b(?:liquid damage|water damage|corrosion|activation locked|icloud locked|mdm locked|no power|motherboard|logic board|broken screen|damaged screen|broken hinge)\b/.test(
       evidence
     );
+  const untested = /\b(?:untested|not tested|unable to test|as[- ]is)\b/.test(evidence);
+  const missingPower = /\b(?:no charger|charger not included|no charging cord|no power cord|no (?:ac |power )?adapter|adapter not included)\b/.test(evidence);
+  const demonstratedPower = /\b(?:boots? to bios|tested working|powers? on|turns? on)\b/.test(evidence);
 
   const likelyIssue = String(analysis.likelyIssue || "").toLowerCase();
   const simpleReplaceableIssue =
@@ -2601,7 +2679,7 @@ function applyDeterministicRepairRules(
     bootsToBios &&
     missingStorage &&
     !additionalMissingParts &&
-    !seriousDamage
+    !seriousDamage && (!untested || demonstratedPower)
   ) {
     analysis.likelyIssue = "Missing SSD; system reaches BIOS";
     analysis.repairDifficulty = Math.min(
@@ -2629,7 +2707,7 @@ function applyDeterministicRepairRules(
   // Keep the model's risk score internally consistent. A straightforward,
   // replaceable-part repair cannot reasonably be both high probability and
   // maximum risk unless the listing contains separate serious-damage evidence.
-  if (simpleReplaceableIssue && !seriousDamage) {
+  if (simpleReplaceableIssue && !seriousDamage && (!untested || demonstratedPower)) {
     const successProbability = Number(
       analysis.repairSuccessProbability
     ) || 0;
@@ -2647,13 +2725,23 @@ function applyDeterministicRepairRules(
     }
   }
 
+  if (untested && !demonstratedPower) {
+    analysis.repairRisk = Math.max(Number(analysis.repairRisk) || 0, missingPower ? 8 : 7);
+    analysis.repairSuccessProbability = Math.min(Number(analysis.repairSuccessProbability) || 0, missingPower ? 40 : 55);
+    if (/\bbattery\b/i.test(analysis.likelyIssue || "")) {
+      analysis.likelyIssue = "Untested device; battery failure not confirmed";
+    }
+    analysis.redFlags = [...new Set([...(analysis.redFlags || []), "Untested; no proof of power", ...(missingPower ? ["Power adapter missing"] : [])])];
+  }
+
   return analysis;
 }
 
 async function findWorkingComparables(
   env,
   searchQuery,
-  category = ""
+  category = "",
+  requiredModel = null
 ) {
   const accessToken = await getEbayToken(env);
   const categoryProfile = getCategoryProfile(category);
@@ -2833,6 +2921,7 @@ async function findWorkingComparables(
     .filter((item) => {
       const title = String(item.title || "");
       const normalizedTitle = normalize(title);
+      if (requiredModel && !normalizedTitle.includes(requiredModel)) return false;
       const condition = String(item.condition || "").toLowerCase();
       const buyingOptions = item.buyingOptions || [];
 
