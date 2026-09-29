@@ -382,6 +382,24 @@ function getSellerEvidence(listing, details = {}) {
     .replace(/&(?:nbsp|amp|quot|#39);/gi, " ").toLowerCase();
 }
 
+function ebayBuyerContext(env) {
+  const zip = String(env.BUYER_ZIP || "83440");
+  if (!/^\d{5}$/.test(zip)) throw new Error("BUYER_ZIP must be a five-digit US ZIP code");
+  return "contextualLocation=" + encodeURIComponent("country=US,zip=" + zip);
+}
+function quotedShipping(options) {
+  const costs = (options || []).filter(o => o.shippingCostType !== "LOCAL_PICKUP")
+    .map(o => o.shippingCost?.value).filter(v => v !== undefined && v !== null)
+    .map(Number).filter(v => Number.isFinite(v) && v >= 0);
+  return costs.length ? Math.min(...costs) : null;
+}
+function savedShippingQuote(details) {
+  const costs = (details.shippingDetails || []).filter(o => o.type !== "LOCAL_PICKUP")
+    .map(o => o.cost).filter(v => v !== undefined && v !== null)
+    .map(Number).filter(v => Number.isFinite(v) && v >= 0);
+  return costs.length ? Math.min(...costs) : null;
+}
+
 function getUnverifiedConsoleReason(listing, details = {}) {
   if (listing.category !== "Game Consoles") return null;
   const text = getSellerEvidence(listing, details);
@@ -913,6 +931,7 @@ async function scanListings(env) {
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+          "X-EBAY-C-ENDUSERCTX": ebayBuyerContext(env),
         },
       });
 
@@ -939,13 +958,8 @@ async function scanListings(env) {
         const statements = recentItems.map((item) => {
           const price = Number(item.price?.value || 0);
 
-      const shippingValues = (item.shippingOptions || [])
-        .map((option) => Number(option.shippingCost?.value || 0))
-        .filter(Number.isFinite);
-
-        const shipping = shippingValues.length
-          ? Math.min(...shippingValues)
-          : 0;
+          // Initial estimate only; enrichment must confirm the shipping quote.
+          const shipping = quotedShipping(item.shippingOptions) ?? 30;
 
           const estimatedTax =
             Math.round((price + shipping) * 0.06 * 100) / 100;
@@ -1697,8 +1711,12 @@ async function sendPendingDealAlerts(env, limit = 3) {
       } catch {
         details = { shortDescription: listing.description || "" };
       }
-      const rejectReason = getSellerRejectReason(listing, details) ||
-        getUnverifiedConsoleReason(listing, details);
+      const shippingQuote = savedShippingQuote(details);
+      const rejectReason = shippingQuote === null ||
+        Math.abs(shippingQuote - Number(listing.shipping_cost)) > 0.01
+        ? "Shipping quote unavailable or changed since analysis; buy cost must be recalculated"
+        : getSellerRejectReason(listing, details) ||
+          getUnverifiedConsoleReason(listing, details);
       if (rejectReason) {
         await env.DB.prepare(`
           UPDATE listings SET status = 'rejected', analysis_status = 'filtered',
@@ -1787,6 +1805,7 @@ async function enrichCandidates(env, limit = 10) {
           headers: {
             Authorization: `Bearer ${accessToken}`,
             "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+            "X-EBAY-C-ENDUSERCTX": ebayBuyerContext(env),
           },
         });
 
@@ -1811,7 +1830,7 @@ async function enrichCandidates(env, limit = 10) {
         const shippingDetails = (item.shippingOptions || []).map(
           (option) => ({
             type: option.shippingCostType || null,
-            cost: option.shippingCost?.value || "0",
+            cost: option.shippingCost?.value ?? null,
             currency: option.shippingCost?.currency || "USD",
             minDeliveryDate: option.minEstimatedDeliveryDate || null,
             maxDeliveryDate: option.maxEstimatedDeliveryDate || null,
@@ -1838,6 +1857,8 @@ async function enrichCandidates(env, limit = 10) {
           title: listing.title,
           condition: item.condition || "",
           description: JSON.stringify(savedDetails),
+          shipping: quotedShipping(item.shippingOptions),
+          price: Number(item.price?.value),
         };
       } catch (error) {
         return {
@@ -1852,23 +1873,25 @@ async function enrichCandidates(env, limit = 10) {
 
   const updates = outcomes.map((outcome) => {
     if (outcome.ok) {
+      if (outcome.shipping === null || !Number.isFinite(outcome.price) || outcome.price <= 0) {
+        return env.DB.prepare(`
+          UPDATE listings SET description = ?, status = 'rejected',
+            analysis_status = 'filtered', recommendation = 'PASS',
+            deal_score = 0,
+            reasoning = 'Destination-specific shipping or price unavailable; cannot verify buy cost'
+          WHERE id = ?
+        `).bind(outcome.description, outcome.id);
+      }
+      const tax = Math.round((outcome.price + outcome.shipping) * 0.06 * 100) / 100;
+      const buyCost = Math.round((outcome.price + outcome.shipping + tax) * 100) / 100;
       return env.DB.prepare(`
-        UPDATE listings
-        SET
-          description = ?,
-          condition = CASE
-            WHEN ? = '' THEN condition
-            ELSE ?
-          END,
-          analysis_status = 'details_ready',
-          last_seen_at = CURRENT_TIMESTAMP
+        UPDATE listings SET description = ?, price = ?, shipping_cost = ?,
+          estimated_tax = ?, total_buy_cost = ?,
+          condition = CASE WHEN ? = '' THEN condition ELSE ? END,
+          analysis_status = 'details_ready', last_seen_at = CURRENT_TIMESTAMP
         WHERE id = ?
-      `).bind(
-        outcome.description,
-        outcome.condition,
-        outcome.condition,
-        outcome.id
-      );
+      `).bind(outcome.description, outcome.price, outcome.shipping, tax,
+        buyCost, outcome.condition, outcome.condition, outcome.id);
     }
 
     return env.DB.prepare(`
