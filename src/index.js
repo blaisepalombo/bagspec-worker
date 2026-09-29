@@ -382,6 +382,21 @@ function getSellerEvidence(listing, details = {}) {
     .replace(/&(?:nbsp|amp|quot|#39);/gi, " ").toLowerCase();
 }
 
+function getUnverifiedConsoleReason(listing, details = {}) {
+  if (listing.category !== "Game Consoles") return null;
+  const text = getSellerEvidence(listing, details);
+  const forParts = /\b(?:for parts|parts or repair|not working|read description|as[- ]is)\b/.test(text) ||
+    /\bparts\b/i.test(listing.condition || "");
+  if (!forParts) return null;
+  if (/\b(?:ylod|r\s?lod|yellow light of death|red light of death|overheats?|shuts? off|turns? off|freezes?)\b/.test(text))
+    return "Seller reports a console fault beyond a missing drive";
+  const negative = /\b(?:not tested|untested|unable to test)\b/.test(text) || /\b(?:does not|doesn't|will not|won't|cannot|can't|fails to|no)\s+(?:fully\s+)?(?:boot|power|turn on|start|work)\b/.test(text);
+  const boots = /\b(?:boots? (?:to|into) (?:the )?(?:menu|dashboard|xmb|recovery|system software)|powers? on (?:to|and) |turns? on (?:to|and) |tested (?:and )?working|plays? (?:ps[123] )?games?|displays? (?:the )?(?:menu|dashboard|install screen))\b/.test(text);
+  if (!boots || negative)
+    return "For-parts console has no clear seller proof of booting; missing storage may not be the only fault";
+  return null;
+}
+
 function getSellerRejectReason(listing, details = {}) {
   const text = getSellerEvidence(listing, details);
   if (/\b(?:liquid damage|water damage|corrosion|burnt board|burned board|icloud locked|activation locked|mdm locked|bios password|computrace)\b/.test(text))
@@ -1595,12 +1610,12 @@ function buildDiscordDealPayload(listing) {
         inline: true,
       },
       {
-        name: "Expected profit",
+        name: "Projected profit",
         value: `$${Number(listing.estimated_profit || 0).toFixed(2)}`,
         inline: true,
       },
       {
-        name: "Resale",
+        name: "Resale (asking-price estimate)",
         value:
           `eBay $${Number(listing.estimated_resale_ebay || 0).toFixed(2)}\n` +
           `Local $${Number(listing.estimated_resale_local || 0).toFixed(2)}`,
@@ -1629,7 +1644,7 @@ function buildDiscordDealPayload(listing) {
       },
     ],
     footer: {
-      text: "BagSpec • Verify the listing before purchasing",
+      text: "BagSpec • Verify condition and recent sold prices before purchasing",
     },
   };
 
@@ -1682,7 +1697,8 @@ async function sendPendingDealAlerts(env, limit = 3) {
       } catch {
         details = { shortDescription: listing.description || "" };
       }
-      const rejectReason = getSellerRejectReason(listing, details);
+      const rejectReason = getSellerRejectReason(listing, details) ||
+        getUnverifiedConsoleReason(listing, details);
       if (rejectReason) {
         await env.DB.prepare(`
           UPDATE listings SET status = 'rejected', analysis_status = 'filtered',
@@ -2017,7 +2033,8 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     };
   }
 
-  const sellerRejectReason = getSellerRejectReason(listing, savedDetails);
+  const sellerRejectReason = getSellerRejectReason(listing, savedDetails) ||
+    getUnverifiedConsoleReason(listing, savedDetails);
   if (sellerRejectReason) {
     await env.DB.prepare(`
       UPDATE listings SET status = 'rejected', analysis_status = 'filtered',
