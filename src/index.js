@@ -580,6 +580,16 @@ function getAccessoryRejectReason(title) {
     },
     {
       pattern:
+        /\b(?:printer|labelwriter(?:\s+[\w-]+)?)\s+(?:replacement\s+)?parts?\s*[-:]\s*\S/i,
+      reason: "Printer part rather than a complete label printer",
+    },
+    {
+      pattern:
+        /\b(?:front trim|top lid|printer lid|printhead|print head|platen roller)\s+(?:for|compatible with)\s+.*\b(?:printer|labelwriter)\b/i,
+      reason: "Printer component rather than a complete device",
+    },
+    {
+      pattern:
         /^\s*(?:memory|ram|hdd|ssd|hard drive|lcd|screen)\b.*\b(?:for|compatible with)\b/,
       reason: "Replacement component rather than a complete device",
     },
@@ -1700,6 +1710,18 @@ async function sendPendingDealAlerts(env, limit = 3) {
     LIMIT ?
   `).bind(safeLimit).all();
 
+  // Remove previously scored component-only listings from the deals list.
+  await env.DB.prepare(`
+    UPDATE listings
+    SET status = 'rejected', analysis_status = 'filtered',
+      deal_score = 0, recommendation = 'PASS',
+      reasoning = 'Printer part rather than a complete label printer'
+    WHERE category = 'Label Printers'
+      AND recommendation IN ('BUY', 'WATCH')
+      AND (lower(title) LIKE '%printer part - %'
+        OR lower(title) LIKE '%printer part: %')
+  `).run();
+
   const sent = [];
   const failed = [];
 
@@ -1711,12 +1733,14 @@ async function sendPendingDealAlerts(env, limit = 3) {
       } catch {
         details = { shortDescription: listing.description || "" };
       }
+      const accessoryReason = getAccessoryRejectReason(listing.title) ||
+        getCategoryRejectReason(listing.title, listing.category);
       const shippingQuote = savedShippingQuote(details);
-      const rejectReason = shippingQuote === null ||
+      const rejectReason = accessoryReason || (shippingQuote === null ||
         Math.abs(shippingQuote - Number(listing.shipping_cost)) > 0.01
         ? "Shipping quote unavailable or changed since analysis; buy cost must be recalculated"
         : getSellerRejectReason(listing, details) ||
-          getUnverifiedConsoleReason(listing, details);
+          getUnverifiedConsoleReason(listing, details));
       if (rejectReason) {
         await env.DB.prepare(`
           UPDATE listings SET status = 'rejected', analysis_status = 'filtered',
