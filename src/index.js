@@ -44,7 +44,12 @@ export default {
       });
     }
 
-    if (!isAuthorized(request, env)) {
+    const authorized = isAuthorized(request, env);
+    const publicDashboardRoutes = new Set([
+      "/dashboard", "/deals", "/listings", "/diagnostics",
+    ]);
+
+    if ((!publicDashboardRoutes.has(url.pathname) || request.method !== "GET") && !authorized) {
       return new Response("BagSpec login required", {
         status: 401,
         headers: {
@@ -182,7 +187,9 @@ export default {
 
     if (url.pathname === "/diagnostics") {
       try {
-        return Response.json(await getDiagnostics(env));
+        return Response.json(authorized
+          ? await getDiagnostics(env)
+          : await getPublicDashboardDiagnostics(env));
       } catch (error) {
         return Response.json(
           { error: "Diagnostics failed", details: error.message },
@@ -252,7 +259,7 @@ export default {
 
       return Response.json({
         count: results.length,
-        deals: results,
+        deals: authorized ? results : results.map(({ reasoning, ...deal }) => deal),
       });
     }
 
@@ -282,7 +289,7 @@ export default {
 
       return Response.json({
         count: results.length,
-        listings: results,
+        listings: authorized ? results : results.map(({ reasoning, ...listing }) => listing),
       });
     }
 
@@ -1368,6 +1375,32 @@ async function requeueInvalidScreenings(env) {
   `).bind(eventKey).run();
 
   return { queued: Number(result.meta?.changes || 0) };
+}
+
+async function getPublicDashboardDiagnostics(env) {
+  const [scans, cycles, queue] = await Promise.all([
+    env.DB.prepare(`
+      SELECT started_at, completed_at, status, listings_found, new_listings
+      FROM scan_runs ORDER BY id DESC LIMIT 8
+    `).all(),
+    env.DB.prepare(`
+      SELECT started_at, completed_at, status, summary
+      FROM cycle_runs ORDER BY id DESC LIMIT 8
+    `).all(),
+    env.DB.prepare(`
+      SELECT category, analysis_status, recommendation, COUNT(*) AS count
+      FROM listings
+      WHERE analysis_status = 'details_ready' OR recommendation IN ('BUY', 'WATCH')
+      GROUP BY category, analysis_status, recommendation
+      ORDER BY category, analysis_status, recommendation
+    `).all(),
+  ]);
+
+  return {
+    recentScans: scans.results,
+    recentCycles: cycles.results,
+    queue: queue.results,
+  };
 }
 
 async function getDiagnostics(env) {
