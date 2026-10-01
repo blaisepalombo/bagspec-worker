@@ -391,7 +391,8 @@ const SEARCH_TERMS = {
   "Premium Audio": ["speaker", "sonos", "soundlink", "soundbar"],
   "Label Printers": ["label printer", "zebra printer", "dymo labelwriter", "rollo printer"],
 };
-const FRESH_LISTING_HOURS = 6;
+const FRESH_LISTING_HOURS = 12;
+const DAILY_VERIFICATION_LIMIT = 10;
 
 function getSearchTerm(search, scanSlot) {
   const category = search.profile_key || search.category || search.name;
@@ -863,12 +864,14 @@ function classifyTitle(title, totalBuyCost, category) {
     score += 6;
   }
 
-  if (/\buntested\b/.test(text)) {
-    score -= 10;
+  if (/\b(?:untested|not tested|unable to test)\b/.test(text)) {
+    score -= 25;
   }
-
-  if (/\b(no power|dead)\b/.test(text)) {
-    score -= 15;
+  if (/\b(?:as-is|as is)\b/.test(text)) {
+    score -= 8;
+  }
+  if (/\b(?:no power|won't power on|doesn't power on|dead)\b/.test(text)) {
+    score -= 30;
   }
 
   score = Math.max(5, Math.min(95, score));
@@ -940,13 +943,30 @@ async function scanListings(env) {
     let olderOrUndatedIgnored = 0;
 
     const scanSlot = Math.floor(Date.now() / (5 * 60 * 1000));
-    for (const search of searches) {
+    const searchTasks = searches.map((search) => ({
+      search,
+      query: getSearchTerm(search, scanSlot),
+    }));
+    // One additional rotating niche query per cycle increases coverage
+    // without doubling Browse API usage.
+    const rotatingSearches = searches.filter((search) => {
+      const category = search.profile_key || search.category || search.name;
+      return (SEARCH_TERMS[category] || []).length > 1;
+    });
+    if (rotatingSearches.length) {
+      const search = rotatingSearches[scanSlot % rotatingSearches.length];
+      const query = getSearchTerm(search, scanSlot + 1);
+      if (query !== getSearchTerm(search, scanSlot)) {
+        searchTasks.push({ search, query });
+      }
+    }
+    for (const { search, query } of searchTasks) {
       const ebayUrl = new URL(
         "https://api.ebay.com/buy/browse/v1/item_summary/search"
       );
 
-      ebayUrl.searchParams.set("q", getSearchTerm(search, scanSlot));
-      ebayUrl.searchParams.set("limit", "100");
+      ebayUrl.searchParams.set("q", query);
+      ebayUrl.searchParams.set("limit", "200");
       ebayUrl.searchParams.set("sort", "newlyListed");
 
       if (search.category_id) {
@@ -979,6 +999,8 @@ async function scanListings(env) {
       const items = data.itemSummaries || [];
 
       listingsFound += items.length;
+      const searchResultCount = Number(data.total) || 0;
+      const searchSaturated = items.length >= 200;
 
       const recentItems = items.filter((item) => {
         const postedAt = Date.parse(item.itemCreationDate || "");
@@ -988,6 +1010,7 @@ async function scanListings(env) {
         return isRecent;
       });
 
+      let newForSearch = 0;
       if (recentItems.length > 0) {
         const statements = recentItems.map((item) => {
           const price = Number(item.price?.value || 0);
@@ -1053,12 +1076,24 @@ async function scanListings(env) {
 
         const writeResults = await env.DB.batch(statements);
 
-        newListings += writeResults.reduce(
+        newForSearch = writeResults.reduce(
           (total, result) =>
             total + Number(result.meta?.changes || 0),
           0
         );
+        newListings += newForSearch;
       }
+
+      await env.DB.prepare(`
+        INSERT INTO scan_search_stats (
+          scan_run_id, category, query, result_count, reported_total,
+          fresh_count, new_count, saturated
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        runId, search.profile_key || search.category || search.name, query,
+        items.length, searchResultCount, recentItems.length,
+        newForSearch, searchSaturated ? 1 : 0
+      ).run();
 
       await env.DB.prepare(`
         UPDATE searches
@@ -1079,11 +1114,12 @@ async function scanListings(env) {
 
     return {
       status: "Scan completed",
-      searchesRun: searches.length,
+      searchesRun: searchTasks.length,
       listingsFound,
       newListings,
       duplicatesIgnored: listingsFound - newListings - olderOrUndatedIgnored,
       olderOrUndatedIgnored,
+      saturatedSearches: (await env.DB.prepare(`SELECT COUNT(*) AS count FROM scan_search_stats WHERE scan_run_id = ? AND saturated = 1`).bind(runId).first())?.count || 0,
     };
   } catch (error) {
     if (runId) {
@@ -1329,6 +1365,21 @@ async function ensureRuntimeTables(env) {
   `).run();
 
   await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS scan_search_stats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scan_run_id INTEGER NOT NULL,
+      category TEXT NOT NULL,
+      query TEXT NOT NULL,
+      result_count INTEGER NOT NULL,
+      reported_total INTEGER NOT NULL,
+      fresh_count INTEGER NOT NULL,
+      new_count INTEGER NOT NULL,
+      saturated INTEGER NOT NULL,
+      scanned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  await env.DB.prepare(`
     CREATE TABLE IF NOT EXISTS cycle_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1407,7 +1458,7 @@ async function getPublicDashboardDiagnostics(env) {
 async function getDiagnostics(env) {
   await ensureRuntimeTables(env);
   const [recentScans, recentCycles, queue, recentDecisions, aiUsage,
-    passReasons, nearMisses, validScreens] =
+    passReasons, nearMisses, validScreens, searchCoverage, queueAge] =
     await Promise.all([
       env.DB.prepare(`
         SELECT *
@@ -1494,6 +1545,26 @@ async function getDiagnostics(env) {
           AND COALESCE(json_extract(reasoning, '$.comparisonSearchQuery'), '') <> ''
         ORDER BY id DESC LIMIT 8
       `).all(),
+      env.DB.prepare(`
+        SELECT category, query, COUNT(*) AS runs,
+          SUM(result_count) AS results_returned,
+          SUM(fresh_count) AS fresh_results,
+          SUM(new_count) AS new_listings,
+          SUM(saturated) AS saturated_runs,
+          MAX(scanned_at) AS last_scanned_at
+        FROM scan_search_stats
+        WHERE scanned_at >= datetime('now', '-24 hours')
+        GROUP BY category, query ORDER BY category, query
+      `).all(),
+      env.DB.prepare(`
+        SELECT category, analysis_status, COUNT(*) AS count
+        FROM listings
+        WHERE status = 'candidate'
+          AND analysis_status IN ('awaiting_details', 'details_ready')
+          AND item_creation_date >= datetime('now', '-24 hours')
+          AND item_creation_date < datetime('now', '-12 hours')
+        GROUP BY category, analysis_status
+      `).all(),
     ]);
 
   return {
@@ -1512,6 +1583,9 @@ async function getDiagnostics(env) {
     decisionsFromListingsFirstSeenInLast24Hours:
       recentDecisions.results,
     aiUsage: aiUsage.results,
+    searchCoverageLast24Hours: searchCoverage.results,
+    olderQueuedCandidates: queueAge.results,
+    verificationLimitPerDay: DAILY_VERIFICATION_LIMIT,
     passReasonsLast24Hours: passReasons.results,
     closestPassesLast24Hours: nearMisses.results,
     recentScreeningsWithRealQueries: validScreens.results,
@@ -1841,11 +1915,11 @@ async function enrichCandidates(env, limit = 10) {
     WHERE
       status = 'candidate'
       AND analysis_status = 'awaiting_details'
-      AND item_creation_date >= datetime('now', '-6 hours')
+      AND item_creation_date >= datetime('now', '-12 hours')
     ORDER BY
       deal_score + CASE
         WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
-        WHEN item_creation_date >= datetime('now', '-6 hours') THEN 8
+        WHEN item_creation_date >= datetime('now', '-12 hours') THEN 8
         ELSE 0
       END DESC,
       item_creation_date DESC
@@ -2055,12 +2129,12 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     WHERE
       status = 'candidate'
       AND analysis_status = 'details_ready'
-      AND item_creation_date >= datetime('now', '-6 hours')
+      AND item_creation_date >= datetime('now', '-12 hours')
       ${exclusionSql}
     ORDER BY
       deal_score + CASE
         WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
-        WHEN item_creation_date >= datetime('now', '-6 hours') THEN 8
+        WHEN item_creation_date >= datetime('now', '-12 hours') THEN 8
         ELSE 0
       END DESC,
       item_creation_date DESC
@@ -2074,11 +2148,11 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
       WHERE
         status = 'candidate'
         AND analysis_status = 'details_ready'
-        AND item_creation_date >= datetime('now', '-6 hours')
+        AND item_creation_date >= datetime('now', '-12 hours')
       ORDER BY
         deal_score + CASE
           WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
-          WHEN item_creation_date >= datetime('now', '-6 hours') THEN 8
+          WHEN item_creation_date >= datetime('now', '-12 hours') THEN 8
           ELSE 0
         END DESC,
         item_creation_date DESC
@@ -2385,7 +2459,7 @@ reject, rejectReason, explanation. Do not use Markdown.
   if (recommendation === "BUY") {
     const verificationCalls = await getVerificationCallsToday(env);
 
-    if (verificationCalls >= 5) {
+    if (verificationCalls >= DAILY_VERIFICATION_LIMIT) {
       verification = {
         approved: false,
         reason:
