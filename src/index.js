@@ -1,3 +1,5 @@
+import { renderDashboard } from "./dashboard.js";
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -43,6 +45,17 @@ export default {
         status: 401,
         headers: {
           "WWW-Authenticate": 'Basic realm="BagSpec Admin"',
+        },
+      });
+    }
+
+    if (url.pathname === "/dashboard") {
+      return new Response(renderDashboard(), {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+          "Content-Security-Policy": "default-src 'self'; img-src 'self' https://i.ebayimg.com data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
         },
       });
     }
