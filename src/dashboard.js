@@ -4,73 +4,100 @@ export function renderDashboard() {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#101713">
-  <title>BagSpec — Deal desk</title>
+  <meta name="theme-color" content="#0b0d0c">
+  <title>Dashboard | BagSpec</title>
   <style>
-    :root { color-scheme: dark; --bg:#101713; --surface:#19231d; --surface2:#202e26; --line:#344439; --ink:#ecf5e9; --muted:#9eb2a0; --accent:#bbef72; --warn:#f9c87a; --red:#f5a7a1; }
-    * { box-sizing:border-box; } body { margin:0; font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif; background:radial-gradient(circle at 85% -20%,#30452e 0,transparent 37%),var(--bg); color:var(--ink); }
-    button,input,select { font:inherit; } button { cursor:pointer; } a { color:inherit; }
-    .shell { max-width:1220px; margin:auto; padding:0 28px 80px; }
-    header { display:flex; align-items:center; justify-content:space-between; gap:16px; border-bottom:1px solid var(--line); padding:22px 0; }
-    .brand { font-size:23px; font-weight:850; letter-spacing:-.055em; text-decoration:none; display:flex; align-items:center; gap:10px; }
-    .brand-mark { display:inline-grid; place-items:center; width:32px; height:32px; border-radius:9px; background:var(--accent); color:#182219; font-size:20px; font-weight:900; }
-    .header-right,.status { display:flex; align-items:center; gap:12px; color:var(--muted); font-size:13px; }
-    .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 4px #bbef7220; margin-right:7px; }
-    .btn { border:1px solid var(--line); background:var(--surface2); color:var(--ink); border-radius:10px; padding:9px 14px; font-weight:650; }
-    .btn:hover,.pill:hover { border-color:var(--accent); } .btn:disabled { opacity:.5; cursor:wait; }
-    .hero { display:flex; align-items:end; justify-content:space-between; gap:24px; padding:42px 0 30px; }
-    .eyebrow { color:var(--accent); text-transform:uppercase; letter-spacing:.16em; font-size:11px; font-weight:800; }
-    h1 { font-size:clamp(34px,5vw,56px); line-height:1.04; letter-spacing:-.065em; margin:9px 0; } h2 { font-size:22px; letter-spacing:-.035em; margin:0; }
-    .sub { color:var(--muted); max-width:600px; margin:0; } .hero-note { font-size:12px; color:var(--muted); text-align:right; max-width:260px; }
-    .metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:32px; }
-    .metric,.panel,.deal,.list-row { background:var(--surface); border:1px solid var(--line); border-radius:15px; }
-    .metric { padding:20px; min-height:118px; } .metric small { color:var(--muted); display:block; } .metric strong { font-size:30px; letter-spacing:-.06em; display:block; margin-top:7px; line-height:1; } .metric em { display:block; color:var(--muted); font-size:12px; font-style:normal; margin-top:8px; }
-    .section-top { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:0 0 16px; }
-    .controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:14px; }
-    .tabs { display:flex; gap:5px; background:var(--surface); border:1px solid var(--line); border-radius:11px; padding:4px; }
-    .tab { background:transparent; border:0; color:var(--muted); border-radius:8px; padding:7px 12px; font-weight:650; }
-    .tab.active { background:#38503b; color:var(--ink); }
-    .input,.select { background:var(--surface); color:var(--ink); border:1px solid var(--line); border-radius:10px; padding:10px 12px; min-height:40px; }
-    .input { flex:1; min-width:190px; } .select { max-width:185px; }
-    .chips { display:flex; flex-wrap:wrap; gap:7px; margin-bottom:17px; }
-    .pill { border:1px solid var(--line); background:transparent; color:var(--muted); border-radius:99px; padding:6px 11px; font-size:12px; }
-    .pill.active { color:#142013; background:var(--accent); border-color:var(--accent); font-weight:750; }
-    .cards { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
-    .deal { padding:18px; display:flex; flex-direction:column; gap:15px; min-width:0; }
-    .deal-head { display:flex; gap:14px; min-width:0; }
-    .thumb { width:90px; height:90px; object-fit:contain; background:#ecf0e9; border-radius:10px; flex:none; }
-    .no-thumb { display:grid; place-items:center; color:#95a996; background:var(--surface2); font-size:25px; }
-    .deal-body { min-width:0; flex:1; } .meta { display:flex; flex-wrap:wrap; align-items:center; gap:7px; color:var(--muted); font-size:12px; }
-    .tag { display:inline-block; background:#334533; color:var(--accent); border-radius:5px; padding:2px 7px; font-size:11px; font-weight:800; letter-spacing:.05em; }
-    .tag.watch { background:#51412b; color:var(--warn); } .tag.pass { color:var(--muted); background:#2a332c; }
-    .deal h3 { margin:9px 0 2px; font-size:17px; line-height:1.32; letter-spacing:-.025em; } .deal h3 a { text-decoration:none; } .deal h3 a:hover { color:var(--accent); }
-    .facts { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; border-top:1px solid var(--line); padding-top:14px; }
-    .facts small { display:block; color:var(--muted); font-size:11px; } .facts strong { font-size:16px; font-weight:750; } .facts .profit { color:var(--accent); }
-    .reason { color:var(--muted); font-size:13px; margin:0; } .actions { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:auto; }
-    .link { color:var(--accent); text-decoration:none; font-weight:750; font-size:13px; } .link:hover { text-decoration:underline; }
-    .caution { color:var(--muted); font-size:11px; } .empty { border:1px dashed var(--line); border-radius:14px; padding:48px 24px; text-align:center; color:var(--muted); grid-column:1/-1; }
-    .empty strong { display:block; color:var(--ink); font-size:18px; margin-bottom:5px; }
-    .list { display:grid; gap:9px; } .list-row { display:flex; align-items:center; gap:13px; padding:12px 16px; }
-    .list-row .item { min-width:0; flex:1; } .list-row .item strong { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; } .list-row .item small { color:var(--muted); }
+    :root { color-scheme:dark; --bg:#0b0d0c; --surface:#131714; --line:#303a33; --ink:#f2f5f2; --muted:#afbeb1; --accent:#93d5a6; --warn:#f0c384; --red:#ffa7a1; }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+    button,input,select { font:inherit; } button { cursor:pointer; } a { color:inherit; text-underline-offset:3px; }
+    :focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
+    .visually-hidden { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+    .skip { position:absolute; left:16px; top:-100px; z-index:5; background:var(--accent); color:#08110b; padding:10px 14px; border-radius:6px; font-weight:700; }
+    .skip:focus { top:12px; }
+    .shell { max-width:1120px; margin:auto; padding:0 24px 72px; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:16px; min-height:74px; border-bottom:1px solid var(--line); }
+    .brand { font-size:22px; font-weight:760; letter-spacing:-.04em; text-decoration:none; }
+    .brand-mark { display:none; }
+    .header-right { display:flex; align-items:center; gap:20px; }
+    .status { display:flex; align-items:center; gap:4px; font-size:13px; color:var(--muted); }
+    .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent); margin-right:6px; }
+    .btn { min-height:42px; border:1px solid var(--line); background:transparent; color:var(--ink); border-radius:7px; padding:8px 15px; font-weight:650; }
+    .btn:hover { border-color:var(--accent); } .btn:disabled { opacity:.55; cursor:wait; }
+    .hero { display:flex; align-items:end; justify-content:space-between; gap:24px; padding:38px 0 27px; }
+    .eyebrow { color:var(--accent); font-size:13px; font-weight:720; }
+    h1 { font-size:clamp(30px,4vw,42px); line-height:1.18; letter-spacing:-.045em; margin:7px 0 9px; }
+    h2 { font-size:20px; letter-spacing:-.025em; margin:0; }
+    .sub { color:var(--muted); max-width:690px; margin:0; }
+    .hero-note { font-size:13px; color:var(--muted); white-space:nowrap; margin:0 0 3px; }
+    .metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:35px; }
+    .metric,.panel,.deal,.list-row { background:var(--surface); border:1px solid var(--line); border-radius:8px; }
+    .metric { padding:16px 18px; min-height:112px; }
+    .metric small,.facts small { display:block; color:var(--muted); font-size:13px; }
+    .metric strong { font-size:27px; letter-spacing:-.04em; display:block; margin-top:5px; line-height:1.15; }
+    .metric em { display:block; color:var(--muted); font-size:12px; font-style:normal; margin-top:7px; }
+    .section-top { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:0 0 14px; }
+    .controls { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-bottom:14px; }
+    .tabs { display:flex; gap:3px; border-bottom:1px solid var(--line); width:100%; }
+    .tab { background:transparent; border:0; border-bottom:3px solid transparent; color:var(--muted); padding:10px 15px; min-height:44px; font-weight:650; }
+    .tab.active { border-bottom-color:var(--accent); color:var(--ink); }
+    .tab:hover { color:var(--ink); }
+    .input,.select { background:var(--surface); color:var(--ink); border:1px solid var(--line); border-radius:7px; padding:9px 12px; min-height:44px; }
+    .input { flex:1; min-width:190px; } .select { min-width:170px; }
+    .chips { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:18px; }
+    .pill { border:1px solid var(--line); background:transparent; color:var(--muted); border-radius:6px; padding:7px 12px; min-height:40px; font-size:13px; }
+    .pill.active { color:#07120b; background:var(--accent); border-color:var(--accent); font-weight:700; }
+    .pill:hover { border-color:var(--accent); }
+    .cards { display:grid; grid-template-columns:1fr; gap:10px; }
+    .deal { padding:18px 20px; display:grid; grid-template-columns:minmax(0,1fr) minmax(290px,39%); column-gap:24px; row-gap:13px; min-width:0; }
+    .deal-head { display:flex; gap:15px; min-width:0; }
+    .thumb { width:74px; height:74px; object-fit:contain; background:#e5eae5; border-radius:5px; flex:none; }
+    .no-thumb { display:grid; place-items:center; color:var(--muted); background:#1c241e; font-size:20px; }
+    .deal-body { min-width:0; flex:1; }
+    .meta { display:flex; flex-wrap:wrap; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
+    .tag { display:inline-block; border:1px solid #487353; color:#a4deb0; border-radius:4px; padding:2px 7px; font-size:11px; font-weight:750; }
+    .tag.watch { color:var(--warn); border-color:#665136; } .tag.pass { color:var(--muted); border-color:var(--line); }
+    .deal h3 { margin:8px 0 3px; font-size:17px; line-height:1.35; font-weight:690; }
+    .deal h3 a:hover,.list-row a:hover { color:var(--accent); }
+    .facts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; align-content:center; }
+    .facts strong { font-size:17px; font-weight:700; } .facts .profit { color:var(--accent); }
+    .reason { color:var(--muted); font-size:13px; margin:0; }
+    .actions { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .link { color:var(--accent); font-weight:700; font-size:14px; padding:6px 0; }
+    .caution { color:var(--muted); font-size:12px; }
+    .empty { border:1px dashed var(--line); border-radius:8px; padding:44px 24px; text-align:center; color:var(--muted); }
+    .empty strong { display:block; color:var(--ink); font-size:17px; margin-bottom:5px; }
+    .list { display:grid; gap:8px; }
+    .list-row { display:flex; align-items:center; gap:14px; padding:14px 16px; }
+    .list-row .item { min-width:0; flex:1; }
+    .list-row .item strong { display:block; font-size:14px; }
+    .list-row .item small { color:var(--muted); }
     .list-row .numbers { color:var(--muted); white-space:nowrap; font-size:13px; text-align:right; }
-    .panel { padding:18px; margin-top:14px; } .panel h3 { margin:0 0 14px; } .runs { display:grid; gap:8px; }
-    .run { display:grid; grid-template-columns:145px 1fr 90px; gap:10px; border-top:1px solid var(--line); padding:9px 0; font-size:13px; color:var(--muted); }
-    .run strong { color:var(--ink); font-weight:600; } .error { color:var(--red); } .foot { color:var(--muted); font-size:12px; margin-top:24px; }
+    .panel { padding:18px; margin-top:12px; }
+    .panel h3 { margin:0 0 12px; font-size:17px; }
+    .runs { display:grid; }
+    .run { display:grid; grid-template-columns:160px 1fr 135px; gap:12px; border-top:1px solid var(--line); padding:10px 0; font-size:13px; color:var(--muted); }
+    .run strong { color:var(--ink); font-weight:600; overflow-wrap:anywhere; }
+    .error { color:var(--red); } .foot { color:var(--muted); font-size:13px; margin-top:30px; max-width:760px; }
     [hidden] { display:none !important; }
-    @media(max-width:850px) { .metrics { grid-template-columns:repeat(2,1fr); } .cards { grid-template-columns:1fr; } .hero-note { display:none; } }
-    @media(max-width:540px) { .shell { padding:0 15px 55px; } header { padding:16px 0; } .status { display:none; } .hero { padding:30px 0 22px; } .metrics { gap:8px; margin-bottom:26px; } .metric { min-height:104px; padding:14px; } .metric strong { font-size:25px; } .controls { align-items:stretch; } .tabs,.input,.select { width:100%; max-width:none; } .tab { flex:1; } .deal { padding:14px; } .facts strong { font-size:14px; } .run { grid-template-columns:1fr 1fr; } .run span:last-child { text-align:right; } }
+    @media(max-width:850px) { .metrics { grid-template-columns:repeat(2,1fr); } .deal { grid-template-columns:1fr; } }
+    @media(max-width:560px) { .shell { padding:0 16px 55px; } header { min-height:64px; } .status { display:none; } .hero { padding:27px 0 23px; display:block; } .hero-note { margin-top:12px; } .metrics { gap:8px; margin-bottom:30px; } .metric { padding:13px; min-height:100px; } .metric strong { font-size:23px; } .controls { gap:9px; } .input,.select { width:100%; } .tab { flex:1; padding:10px 5px; font-size:13px; } .deal { padding:14px; } .thumb { width:64px; height:64px; } .facts { gap:6px; } .facts strong { font-size:15px; } .actions { flex-wrap:wrap; } .list-row { flex-wrap:wrap; } .list-row .item { flex-basis:calc(100% - 100px); } .list-row .numbers { margin-left:auto; } .run { grid-template-columns:1fr 1fr; } .run span:last-child { text-align:right; } }
+    @media(prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } }
+    @media(forced-colors:active) { .tab.active,.pill.active,.tag { border:2px solid ButtonText; } }
   </style>
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
 <div class="shell">
-  <header><a class="brand" href="/dashboard"><span class="brand-mark">b</span> bagspec<span style="color:var(--accent)">.</span></a><div class="header-right"><span class="status"><span class="dot"></span>Scanner dashboard</span><button class="btn" id="refresh" type="button">↻ Refresh</button></div></header>
-  <main>
-    <div class="hero"><div><div class="eyebrow">Your repair deal desk</div><h1>Find the worth fixing.</h1><p class="sub">A live view of BagSpec’s eBay scanner. Every estimate is a lead for your own inspection, not a guaranteed profit.</p></div><p class="hero-note" id="updated">Loading live results…</p></div>
-    <section class="metrics" aria-label="Scanner summary"><div class="metric"><small>Deals to review</small><strong id="m-deals">—</strong><em>BUY + WATCH labels</em></div><div class="metric"><small>Recent listings</small><strong id="m-listings">—</strong><em>Latest 100 shown</em></div><div class="metric"><small>Newest scan</small><strong id="m-new">—</strong><em id="m-scan-time">Waiting for data</em></div><div class="metric"><small>Last cycle</small><strong id="m-cycle">—</strong><em id="m-cycle-time">Waiting for data</em></div></section>
-    <div class="section-top"><h2>Scanner activity</h2><span class="caution" id="load-state" role="status"></span></div>
-    <div class="controls"><div class="tabs" role="tablist"><button class="tab active" data-tab="deals" role="tab" aria-selected="true">Deals</button><button class="tab" data-tab="listings" role="tab" aria-selected="false">New listings</button><button class="tab" data-tab="operations" role="tab" aria-selected="false">Operations</button></div><input id="search" class="input" type="search" placeholder="Search title or category" aria-label="Search listings"><select id="sort" class="select" aria-label="Sort results"><option value="newest">Newest first</option><option value="score">Highest score</option><option value="profit">Projected profit</option></select></div>
-    <div id="chips" class="chips" aria-label="Filter by category"></div>
-    <section id="deals" class="cards" aria-label="Deals"></section><section id="listings" class="list" aria-label="Recent listings" hidden></section><section id="operations" hidden><div class="panel"><h3>Recent cycles</h3><div id="runs" class="runs"></div></div><div class="panel"><h3>Queue by category</h3><div id="queue" class="runs"></div></div></section>
+  <header><a class="brand" href="/dashboard" aria-label="BagSpec dashboard">BagSpec</a><div class="header-right"><span class="status"><span class="dot" aria-hidden="true"></span>Scanner runs every 5 minutes</span><button class="btn" id="refresh" type="button">Refresh data</button></div></header>
+  <main id="main">
+    <div class="hero"><div><div class="eyebrow">eBay repair scanner</div><h1>Dashboard</h1><p class="sub">Review new listings and scanner results. Check every listing yourself before buying.</p></div><p class="hero-note" id="updated">Loading data…</p></div>
+    <section class="metrics" aria-label="Scanner summary"><div class="metric"><small>Deals shown</small><strong id="m-deals">—</strong><em>Up to 100 BUY and WATCH leads</em></div><div class="metric"><small>Listings shown</small><strong id="m-listings">—</strong><em>Latest 100 listings</em></div><div class="metric"><small>New in latest scan</small><strong id="m-new">—</strong><em id="m-scan-time">Waiting for data</em></div><div class="metric"><small>Scanner status</small><strong id="m-cycle">—</strong><em id="m-cycle-time">Waiting for data</em></div></section>
+    <div class="section-top"><h2>Results</h2><span class="caution" id="load-state" role="status" aria-live="polite"></span></div>
+    <div class="controls"><div class="tabs" role="tablist" aria-label="Dashboard sections"><button id="tab-deals" class="tab active" data-tab="deals" type="button" role="tab" aria-controls="deals" aria-selected="true" tabindex="0">Deals</button><button id="tab-listings" class="tab" data-tab="listings" type="button" role="tab" aria-controls="listings" aria-selected="false" tabindex="-1">New listings</button><button id="tab-operations" class="tab" data-tab="operations" type="button" role="tab" aria-controls="operations" aria-selected="false" tabindex="-1">Operations</button></div><label class="visually-hidden" for="search">Search titles and categories</label><input id="search" class="input" type="search" placeholder="Search titles and categories" autocomplete="off"><label class="visually-hidden" for="sort">Sort results</label><select id="sort" class="select"><option value="newest">Newest first</option><option value="score">Highest score</option><option value="profit">Projected profit</option></select></div>
+    <div id="chips" class="chips" role="group" aria-label="Filter by category"></div>
+    <section id="deals" class="cards" role="tabpanel" aria-labelledby="tab-deals" tabindex="0"></section><section id="listings" class="list" role="tabpanel" aria-labelledby="tab-listings" tabindex="0" hidden></section><section id="operations" role="tabpanel" aria-labelledby="tab-operations" tabindex="0" hidden><div class="panel"><h3>Recent cycles</h3><div id="runs" class="runs"></div></div><div class="panel"><h3>Queue by category</h3><div id="queue" class="runs"></div></div></section>
     <p class="foot">Resale figures come from active asking prices. Check sold prices, condition, shipping, fees, and parts before buying. The scanner runs on its Cloudflare schedule even when this page is closed.</p>
   </main>
 </div>
@@ -79,7 +106,7 @@ export function renderDashboard() {
   const $ = id => document.getElementById(id);
   const state = { tab:'deals', category:'All', deals:[], listings:[], diagnostics:null };
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const money = value => Number.isFinite(Number(value)) ? '$' + Number(value).toFixed(2) : '—';
+  const money = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) ? '$' + Number(value).toFixed(2) : '—';
   const date = value => { if (!value) return null; const d = new Date(String(value).includes('T') ? value : String(value).replace(' ', 'T') + 'Z'); return Number.isNaN(d.getTime()) ? null : d; };
   const when = value => { const d = date(value); return d ? new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(d) : 'Unknown'; };
   const ebayUrl = value => { try { const u = new URL(value); return u.protocol === 'https:' && /(^|\\.)ebay\\.com$/.test(u.hostname) ? u.href : ''; } catch { return ''; } };
@@ -97,7 +124,7 @@ export function renderDashboard() {
     const cats = ['All',...new Set(rows.map(x => x.category).filter(Boolean))];
     if (!cats.includes(state.category)) state.category='All';
     $('chips').hidden = state.tab === 'operations';
-    $('chips').innerHTML = cats.map(c => '<button class="pill ' + (c === state.category ? 'active' : '') + '" type="button" data-category="' + esc(c) + '">' + esc(c) + '</button>').join('');
+    $('chips').innerHTML = cats.map(c => '<button class="pill ' + (c === state.category ? 'active' : '') + '" type="button" aria-pressed="' + (c === state.category ? 'true' : 'false') + '" data-category="' + esc(c) + '">' + esc(c) + '</button>').join('');
   }
   function renderDeals() {
     const rows = filtered(state.deals);
@@ -124,7 +151,7 @@ export function renderDashboard() {
     $('queue').innerHTML = (d.queue || []).filter(x => x.analysis_status === 'details_ready' || x.recommendation === 'BUY' || x.recommendation === 'WATCH').map(x => '<div class="run"><span>' + esc(x.category || 'Other') + '</span><strong>' + esc(x.analysis_status || '') + ' · ' + esc(x.recommendation || '') + '</strong><span>' + esc(x.count || 0) + ' listings</span></div>').join('') || empty('Queue is clear','No current ready items were reported.');
   }
   function render() {
-    document.querySelectorAll('.tab').forEach(x => { const on=x.dataset.tab === state.tab; x.classList.toggle('active',on); x.setAttribute('aria-selected',String(on)); });
+    document.querySelectorAll('.tab').forEach(x => { const on=x.dataset.tab === state.tab; x.classList.toggle('active',on); x.setAttribute('aria-selected',String(on)); x.tabIndex=on ? 0 : -1; });
     ['deals','listings','operations'].forEach(id => $(id).hidden = id !== state.tab);
     $('search').hidden = $('sort').hidden = state.tab === 'operations';
     renderChips(); renderDeals(); renderListings(); renderOperations();
@@ -137,15 +164,30 @@ export function renderDashboard() {
     if (results[1].status==='fulfilled') state.listings=results[1].value.listings || [];
     if (results[2].status==='fulfilled') state.diagnostics=results[2].value;
     const scan=state.diagnostics?.recentScans?.[0], cycle=state.diagnostics?.recentCycles?.[0];
-    $('m-deals').textContent=String(state.deals.length); $('m-listings').textContent=String(state.listings.length);
+    $('m-deals').textContent=results[0].status==='fulfilled' ? String(state.deals.length) : '—';
+    $('m-listings').textContent=results[1].status==='fulfilled' ? String(state.listings.length) : '—';
     $('m-new').textContent=scan ? String(scan.new_listings ?? '—') : '—'; $('m-scan-time').textContent=scan ? when(scan.completed_at || scan.started_at) : 'Scan data unavailable';
-    $('m-cycle').textContent=cycle ? (cycle.status === 'completed' ? 'Healthy' : 'Check') : '—'; $('m-cycle-time').textContent=cycle ? when(cycle.completed_at || cycle.started_at) : 'Cycle data unavailable';
+    const cycleTime=date(cycle?.completed_at || cycle?.started_at);
+    const fresh=cycleTime && Date.now()-cycleTime.getTime() < 15*60*1000;
+    $('m-cycle').textContent=cycle ? (cycle.status === 'completed' && fresh ? 'Running' : 'Check') : '—'; $('m-cycle-time').textContent=cycle ? 'Last cycle ' + when(cycle.completed_at || cycle.started_at) : 'Cycle data unavailable';
     const failures=results.filter(x => x.status==='rejected').length;
     $('load-state').textContent=failures ? failures + ' data source' + (failures===1 ? '' : 's') + ' unavailable' : 'Live data loaded';
     $('updated').textContent='Updated ' + new Intl.DateTimeFormat(undefined,{hour:'numeric',minute:'2-digit'}).format(new Date());
     $('refresh').disabled=false; render();
   }
-  document.querySelectorAll('.tab').forEach(x => x.addEventListener('click',() => {state.tab=x.dataset.tab;state.category='All';render();}));
+  const tabs=Array.from(document.querySelectorAll('.tab'));
+  function activateTab(tab) { state.tab=tab.dataset.tab; state.category='All'; render(); }
+  tabs.forEach((tab,index) => {
+    tab.addEventListener('click',() => activateTab(tab));
+    tab.addEventListener('keydown',event => {
+      let target;
+      if (event.key === 'ArrowRight') target=tabs[(index+1)%tabs.length];
+      if (event.key === 'ArrowLeft') target=tabs[(index-1+tabs.length)%tabs.length];
+      if (event.key === 'Home') target=tabs[0];
+      if (event.key === 'End') target=tabs[tabs.length-1];
+      if (target) { event.preventDefault(); activateTab(target); target.focus(); }
+    });
+  });
   $('chips').addEventListener('click',e => {const b=e.target.closest('[data-category]');if(b){state.category=b.dataset.category;render();}});
   $('search').addEventListener('input',render); $('sort').addEventListener('change',render); $('refresh').addEventListener('click',refresh);
   refresh();
