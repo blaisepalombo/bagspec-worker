@@ -31,6 +31,10 @@ export default {
       return new Response(null, { status: 204 });
     }
 
+    if (url.hostname === "bagspec.com" && url.pathname === "/") {
+      return Response.redirect(url.origin + "/dashboard", 302);
+    }
+
     if (url.pathname === "/") {
       return Response.json({
         status: "BagSpec is running",
