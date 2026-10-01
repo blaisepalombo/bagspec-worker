@@ -1190,6 +1190,7 @@ async function prefilterExisting(env) {
 
 async function runAutomatedCycle(env) {
   await ensureRuntimeTables(env);
+  await invalidateUnderpricedProjectorLeads(env);
   const run = await env.DB.prepare(`
     INSERT INTO cycle_runs (status) VALUES ('running')
   `).run();
@@ -2817,6 +2818,24 @@ function getVerifiedLaptopModel(listing, savedDetails) {
   return null;
 }
 
+async function invalidateUnderpricedProjectorLeads(env) {
+  // Earlier AI estimates priced a genuine PowerLite 118 lamp below Epson's
+  // $76 retail price. Remove those stale leads before sending more alerts.
+  await env.DB.prepare(`
+    UPDATE listings
+    SET status = 'rejected', analysis_status = 'needs_review',
+        recommendation = 'PASS', estimated_parts_cost = 76,
+        estimated_profit = NULL, roi_percent = NULL,
+        suggested_offer = 0, deal_score = 0,
+        reasoning = '{"rejectReason":"Lamp price was underestimated; repair diagnosis unconfirmed. Re-evaluate before buying."}'
+    WHERE category = 'Projectors'
+      AND LOWER(title) LIKE '%powerlite 118%'
+      AND LOWER(COALESCE(likely_issue, '')) LIKE '%lamp%'
+      AND COALESCE(estimated_parts_cost, 0) < 76
+      AND recommendation IN ('BUY', 'WATCH')
+  `).run();
+}
+
 function applyDeterministicRepairRules(
   analysis,
   listing,
@@ -2915,6 +2934,24 @@ function applyDeterministicRepairRules(
       analysis.likelyIssue = "Untested device; battery failure not confirmed";
     }
     analysis.redFlags = [...new Set([...(analysis.redFlags || []), "Untested; no proof of power", ...(missingPower ? ["Power adapter missing"] : [])])];
+  }
+
+  if (listing.category === "Projectors") {
+    const noLight = /\b(?:did not produce any light|no light|no light output|lamp (?:does not|doesn't|won't) (?:light|turn on))\b/.test(evidence);
+    const powerLite118 = /\bpowerlite[\s-]*118\b/.test(evidence);
+    const suspectedLamp = /\b(?:lamp|bulb)\b/.test(evidence + " " + likelyIssue);
+
+    if (powerLite118 && suspectedLamp) {
+      // Verified against Epson's ELPLP97 price on 2026-10-01.
+      analysis.partsCostHigh = Math.max(Number(analysis.partsCostHigh) || 0, 76);
+    }
+
+    if (noLight) {
+      // Powering on does not prove the lamp is the only failed component.
+      analysis.repairRisk = Math.max(Number(analysis.repairRisk) || 0, 7);
+      analysis.repairSuccessProbability = Math.min(Number(analysis.repairSuccessProbability) || 0, 55);
+      analysis.redFlags = [...new Set([...(analysis.redFlags || []), "No light output; cause unconfirmed"])];
+    }
   }
 
   return analysis;
