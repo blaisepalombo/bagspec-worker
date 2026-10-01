@@ -49,5 +49,5 @@ the `BAGSPEC_ADMIN_KEY` secret as the password.
   ready candidate, then sends any unalerted `BUY` deals to Discord.
 - `/test-discord`: sends a harmless test notification to the configured
   Discord webhook.
-- `/deals`: shows all current `BUY` and `WATCH` results.
+- `/dashboard`: authenticated, read-only deal desk with deals, recent listings, and scanner health. Open this route in your browser and sign in with the existing BagSpec admin credentials. The displayed resale and profit figures are estimates, and each listing still needs inspection.\n- `/deals`: shows all current `BUY` and `WATCH` results.
 - `/stats`, `/listings`, and `/candidates`: operational views.
