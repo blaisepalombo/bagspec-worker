@@ -394,6 +394,86 @@ const SEARCH_TERMS = {
 const FRESH_LISTING_HOURS = 12;
 const DAILY_VERIFICATION_LIMIT = 10;
 
+// Typical working, console-only sold prices: the median of the last 90 days
+// of non-bundle eBay sales tracked by PriceCharting, rounded. More specific models come
+// first because the first match wins. Models whose variants sell for very
+// different amounts (Switch with/without Joy-Con, Steam Deck LCD/OLED) are
+// left out and fall back to the comparable search.
+const MODEL_RESALE_CHECKED = "2026-10-17";
+const MODEL_RESALE = [
+  { model: "Xbox Series X", resale: 500, sales: 12,
+    pattern: /\bxbox\s+(?:one\s+)?series\s*x\b/ },
+  { model: "Xbox Series S", resale: 300, sales: 11,
+    pattern: /\bxbox\s+(?:one\s+)?series\s*s\b/ },
+  { model: "Xbox One X", resale: 140, sales: 16,
+    pattern: /\bxbox\s+one\s*x\b/ },
+  // Lower of the 1TB ($112, 18 sales) and 500GB ($99, 14 sales) medians.
+  { model: "Xbox One S", resale: 99, sales: 14,
+    pattern: /\bxbox\s+one\s*s\b/ },
+  { model: "Xbox One", resale: 100, sales: 15,
+    pattern: /\bxbox\s+one\b/ },
+  { model: "PlayStation 5 Digital", resale: 420, sales: 17,
+    pattern: /\b(?:ps5|playstation\s*5)\b[\s\S]*\bdigital\b|\bdigital\b[\s\S]*\b(?:ps5|playstation\s*5)\b/,
+    exclude: /\bpro\b/ },
+  { model: "PlayStation 5", resale: 430, sales: 20,
+    pattern: /\b(?:ps5|playstation\s*5)\b/,
+    exclude: /\bpro\b/ },
+  { model: "PlayStation 4 Pro", resale: 140, sales: 17,
+    pattern: /\b(?:ps4|playstation\s*4)\s*pro\b/ },
+  { model: "PlayStation 4 Slim", resale: 102, sales: 13,
+    pattern: /\b(?:ps4|playstation\s*4)\b[\s\S]*\bslim\b/ },
+  { model: "PlayStation 4", resale: 90, sales: 9,
+    pattern: /\b(?:ps4|playstation\s*4)\b/ },
+  // Lower of the gray ($95, 19 sales) and turquoise ($106, 16 sales) medians.
+  { model: "Nintendo Switch Lite", resale: 95, sales: 19,
+    pattern: /\bswitch\s+lite\b/ },
+].map((entry) => ({ category: "Game Consoles", ...entry }));
+
+function matchModelResale(title, category) {
+  const text = String(title || "").toLowerCase();
+  return MODEL_RESALE.find((entry) =>
+    entry.category === category &&
+    entry.pattern.test(text) &&
+    !(entry.exclude && entry.exclude.test(text))
+  ) || null;
+}
+
+// Highest all-in purchase cost that could still reach WATCH with free parts
+// and no risk reserve, using the same fees, shipping, and thresholds as the
+// full analysis. Anything above it cannot qualify, so it skips the AI call.
+function maxViableBuyCost(resale, category) {
+  const { watchProfit, watchRoi } = getDecisionThresholds(category);
+  const roi = watchRoi / 100;
+  const packingCost = 5;
+  const outboundShipping = getOutboundShippingEstimate(category);
+
+  const ebayNet = resale - (resale * 0.136 + 0.4) - outboundShipping - packingCost;
+  const ebayMax = Math.min(
+    ebayNet - watchProfit,
+    (ebayNet - roi * (packingCost + outboundShipping)) / (1 + roi)
+  );
+
+  const localNet = resale * 0.85 - 5;
+  const localMax = Math.min(
+    localNet - watchProfit,
+    (localNet - roi * (packingCost + 5)) / (1 + roi)
+  );
+
+  return roundMoney(Math.max(ebayMax, localMax, 0));
+}
+
+function getModelPriceRejectReason(title, category, buyCost) {
+  const entry = matchModelResale(title, category);
+  if (!entry) return null;
+
+  const ceiling = maxViableBuyCost(entry.resale, category);
+  if (Number(buyCost) <= ceiling) return null;
+
+  return `${entry.model} typically sells for about $${entry.resale} working; ` +
+    `buy cost $${Number(buyCost).toFixed(2)} is above the $${ceiling.toFixed(2)} ` +
+    "ceiling where even a free repair could reach WATCH";
+}
+
 function getSearchTerm(search, scanSlot) {
   const category = search.profile_key || search.category || search.name;
   const terms = SEARCH_TERMS[category];
@@ -694,7 +774,9 @@ function getCategoryRejectReason(title, category) {
   return null;
 }
 
-function classifyTitle(title, totalBuyCost, category) {
+// screeningCost is the lowest cost the listing can really have; it differs
+// from totalBuyCost when the search result had no shipping quote.
+function classifyTitle(title, totalBuyCost, category, screeningCost = totalBuyCost) {
   const text = title.toLowerCase();
   const accessoryReason = getAccessoryRejectReason(title);
 
@@ -772,6 +854,18 @@ function classifyTitle(title, totalBuyCost, category) {
         reasoning: rule.reason,
       };
     }
+  }
+
+  const priceReason = getModelPriceRejectReason(title, category, screeningCost);
+
+  if (priceReason) {
+    return {
+      status: "rejected",
+      analysisStatus: "filtered",
+      score: 0,
+      recommendation: "PASS",
+      reasoning: priceReason,
+    };
   }
 
   let score = 30;
@@ -1016,7 +1110,8 @@ async function scanListings(env) {
           const price = Number(item.price?.value || 0);
 
           // Initial estimate only; enrichment must confirm the shipping quote.
-          const shipping = quotedShipping(item.shippingOptions) ?? 30;
+          const shippingQuote = quotedShipping(item.shippingOptions);
+          const shipping = shippingQuote ?? 30;
 
           const estimatedTax =
             Math.round((price + shipping) * 0.06 * 100) / 100;
@@ -1029,7 +1124,8 @@ async function scanListings(env) {
           const classification = classifyTitle(
             item.title || "",
             totalBuyCost,
-            search.profile_key || search.category || search.name
+            search.profile_key || search.category || search.name,
+            shippingQuote === null ? price * 1.06 : totalBuyCost
           );
 
           return env.DB.prepare(`
@@ -1861,16 +1957,19 @@ async function sendPendingDealAlerts(env, limit = 3) {
   }
 
   const safeLimit = Math.min(Math.max(Number(limit) || 3, 1), 10);
+  // Use the same freshness window as enrichment and analysis; a shorter one
+  // silently dropped BUYs analyzed late in the window. Skip ended listings.
   const { results: listings } = await env.DB.prepare(`
     SELECT *
     FROM listings
     WHERE
       recommendation = 'BUY'
       AND alerted_at IS NULL
-      AND item_creation_date >= datetime('now', '-6 hours')
+      AND item_creation_date >= datetime('now', ?)
+      AND (item_end_date IS NULL OR julianday(item_end_date) > julianday('now'))
     ORDER BY item_creation_date DESC, deal_score DESC
     LIMIT ?
-  `).bind(safeLimit).all();
+  `).bind(`-${FRESH_LISTING_HOURS} hours`, safeLimit).all();
 
   // Remove previously scored component-only listings from the deals list.
   await env.DB.prepare(`
@@ -2271,6 +2370,23 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     };
   }
 
+  // Recheck against the verified, destination-specific buy cost from
+  // enrichment before spending an AI call.
+  const priceReason = getModelPriceRejectReason(
+    listing.title, listing.category, listing.total_buy_cost
+  );
+  if (priceReason) {
+    await env.DB.prepare(`
+      UPDATE listings SET status = 'rejected', analysis_status = 'filtered',
+        deal_score = 0, recommendation = 'PASS', reasoning = ? WHERE id = ?
+    `).bind(priceReason, listing.id).run();
+    return {
+      status: "Listing rejected before analysis",
+      listing: { title: listing.title, link: listing.item_url, category: listing.category },
+      reason: priceReason,
+    };
+  }
+
   const listingData = {
     title: listing.title,
     category: listing.category,
@@ -2410,7 +2526,14 @@ reject, rejectReason, explanation. Do not use Markdown.
     100
   );
 
-  const ebayResale = roundMoney(comps.conservativeResale);
+  // Asking prices can run well above what consoles actually sell for, so a
+  // known model's resale never exceeds its typical sold price.
+  const modelResale = matchModelResale(listing.title, listing.category);
+  const ebayResale = roundMoney(
+    modelResale
+      ? Math.min(comps.conservativeResale, modelResale.resale)
+      : comps.conservativeResale
+  );
   const localResale = roundMoney(ebayResale * 0.85);
 
   const outboundShipping = getOutboundShippingEstimate(
@@ -2613,6 +2736,9 @@ reject, rejectReason, explanation. Do not use Markdown.
     purchaseCost: listing.total_buy_cost,
     estimatedPartsCost: partsCost,
     riskReserve,
+    modelSoldReference: modelResale
+      ? { model: modelResale.model, typicalSoldPrice: modelResale.resale, checked: MODEL_RESALE_CHECKED }
+      : null,
     ebayResale,
     localResale,
     ebayFee,
