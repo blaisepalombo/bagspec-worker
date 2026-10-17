@@ -1340,7 +1340,21 @@ async function analyzeCandidateBatch(env, limit = 3) {
   };
 }
 
-async function ensureRuntimeTables(env) {
+// Schema checks only need to succeed once per isolate. Repeating them on
+// every stage of every five-minute cycle adds avoidable D1 work.
+let runtimeTablesReady = null;
+
+function ensureRuntimeTables(env) {
+  if (!runtimeTablesReady) {
+    runtimeTablesReady = createRuntimeTables(env).catch((error) => {
+      runtimeTablesReady = null;
+      throw error;
+    });
+  }
+  return runtimeTablesReady;
+}
+
+async function createRuntimeTables(env) {
   const { results: listingColumns } = await env.DB.prepare(
     "PRAGMA table_info(listings)"
   ).all();
@@ -1389,7 +1403,26 @@ async function ensureRuntimeTables(env) {
       error TEXT
     )
   `).run();
+
+  // Without these, each queue, alert, and dashboard query reads the whole
+  // listings table, which exhausts D1's free daily row-read allowance.
+  await env.DB.batch(LISTING_INDEXES.map((sql) => env.DB.prepare(sql)));
 }
+
+const LISTING_INDEXES = [
+  `CREATE INDEX IF NOT EXISTS idx_listings_queue
+    ON listings (status, analysis_status, item_creation_date)`,
+  `CREATE INDEX IF NOT EXISTS idx_listings_recommendation
+    ON listings (recommendation, alerted_at, item_creation_date)`,
+  `CREATE INDEX IF NOT EXISTS idx_listings_analysis_status
+    ON listings (analysis_status, first_seen_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_listings_first_seen
+    ON listings (first_seen_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_scan_search_stats_run
+    ON scan_search_stats (scan_run_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_scan_search_stats_scanned
+    ON scan_search_stats (scanned_at)`,
+];
 
 async function requeueInvalidScreenings(env) {
   const eventKey = 'invalid-screenings-recovered-v1';
@@ -1442,7 +1475,11 @@ async function getPublicDashboardDiagnostics(env) {
     env.DB.prepare(`
       SELECT category, analysis_status, recommendation, COUNT(*) AS count
       FROM listings
-      WHERE analysis_status = 'details_ready' OR recommendation IN ('BUY', 'WATCH')
+      WHERE id IN (
+        SELECT id FROM listings WHERE analysis_status = 'details_ready'
+        UNION
+        SELECT id FROM listings WHERE recommendation IN ('BUY', 'WATCH')
+      )
       GROUP BY category, analysis_status, recommendation
       ORDER BY category, analysis_status, recommendation
     `).all(),
@@ -2073,6 +2110,7 @@ async function enrichCandidates(env, limit = 10) {
       WHERE
         status = 'candidate'
         AND analysis_status = 'awaiting_details'
+        AND item_creation_date >= datetime('now', '-12 hours')
     `).first();
 
     return {
