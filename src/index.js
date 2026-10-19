@@ -247,6 +247,7 @@ export default {
           recommended_channel,
           recommendation,
           reasoning,
+          deal_type,
           first_seen_at
         FROM listings
         WHERE recommendation IN ('BUY', 'WATCH')
@@ -281,6 +282,7 @@ export default {
           analysis_status,
           recommendation,
           reasoning,
+          deal_type,
           first_seen_at
         FROM listings
         ORDER BY first_seen_at DESC
@@ -333,12 +335,14 @@ function isAuthorized(request, env) {
 // calculators, headphones, speakers, and apartment projectors locally.
 // localResaleRate is the share of the eBay comparable price a working unit
 // typically brings on local marketplaces; eBay remains the fallback channel.
+// flipMaxPrice caps the working-item (no repair) search for each category.
 const CATEGORY_PROFILES = {
   "Business Laptops": {
     ebayCategoryId: "175672",
     minimumComparablePrice: 80,
     outboundShipping: 18,
     localResaleRate: 0.9,
+    flipMaxPrice: 400,
     requiredTitle:
       /\b(laptop|notebook|thinkpad|latitude|elitebook|probook|macbook|ideapad|vivobook|zenbook|surface)\b/i,
   },
@@ -347,6 +351,7 @@ const CATEGORY_PROFILES = {
     minimumComparablePrice: 60,
     outboundShipping: 20,
     localResaleRate: 0.9,
+    flipMaxPrice: 350,
     requiredTitle:
       /\b(console|playstation|ps[2-5]|xbox|nintendo|switch|steam deck|game boy|psp|genesis)\b/i,
   },
@@ -355,6 +360,7 @@ const CATEGORY_PROFILES = {
     minimumComparablePrice: 35,
     outboundShipping: 8,
     localResaleRate: 0.95,
+    flipMaxPrice: 70,
     requiredTitle:
       /\b(ti-?\s?8[349]|ti-?\s?nspire|graphing calculator|fx-?9750|fx-?cg50)\b/i,
   },
@@ -363,6 +369,7 @@ const CATEGORY_PROFILES = {
     minimumComparablePrice: 50,
     outboundShipping: 10,
     localResaleRate: 0.85,
+    flipMaxPrice: 200,
     requiredTitle:
       /\b(headphones?|headset|wh-?1000xm\d|quietcomfort|qc\s?(?:35|45|ultra)|airpods max|beats (?:studio|solo))\b/i,
   },
@@ -371,6 +378,7 @@ const CATEGORY_PROFILES = {
     minimumComparablePrice: 55,
     outboundShipping: 18,
     localResaleRate: 0.85,
+    flipMaxPrice: 200,
     requiredTitle:
       /\b(speaker|soundbar|boombox|sonos|soundlink|charge|flip|xtreme)\b/i,
   },
@@ -379,6 +387,7 @@ const CATEGORY_PROFILES = {
     minimumComparablePrice: 70,
     outboundShipping: 24,
     localResaleRate: 0.8,
+    flipMaxPrice: 200,
     requiredTitle: /\bprojector\b/i,
   },
   Cameras: {
@@ -386,6 +395,7 @@ const CATEGORY_PROFILES = {
     minimumComparablePrice: 80,
     outboundShipping: 15,
     localResaleRate: 0.8,
+    flipMaxPrice: 400,
     requiredTitle: /\b(camera|dslr|mirrorless)\b/i,
   },
 };
@@ -415,6 +425,10 @@ const SEARCH_TERMS = {
 // Selling locally avoids shipping, packing, and return risk, so prefer the
 // local channel unless eBay nets meaningfully more.
 const LOCAL_PREFERENCE_DOLLARS = 10;
+// Working-item flips must be described as working; any stated fault or
+// uncertainty belongs in the repair pipeline instead.
+const FLIP_FAULT_PATTERN =
+  /\b(?:for parts|parts only|not working|broken|cracked|damaged|untested|not tested|unable to test|as[- ]is|read description|no power|won't|doesn't work|does not work|faulty|defective|locked|(?<!no )(?:issues?|problems?))\b/;
 const FRESH_LISTING_HOURS = 12;
 const DAILY_VERIFICATION_LIMIT = 10;
 
@@ -839,7 +853,13 @@ function getCategoryRejectReason(title, category) {
 
 // screeningCost is the lowest cost the listing can really have; it differs
 // from totalBuyCost when the search result had no shipping quote.
-function classifyTitle(title, totalBuyCost, category, screeningCost = totalBuyCost) {
+function classifyTitle(
+  title,
+  totalBuyCost,
+  category,
+  screeningCost = totalBuyCost,
+  dealType = "repair"
+) {
   const text = title.toLowerCase();
   const accessoryReason = getAccessoryRejectReason(title);
 
@@ -928,6 +948,26 @@ function classifyTitle(title, totalBuyCost, category, screeningCost = totalBuyCo
       score: 0,
       recommendation: "PASS",
       reasoning: priceReason,
+    };
+  }
+
+  if (dealType === "flip") {
+    if (FLIP_FAULT_PATTERN.test(text)) {
+      return {
+        status: "rejected",
+        analysisStatus: "filtered",
+        score: 0,
+        recommendation: "PASS",
+        reasoning: "Flip listing mentions a fault or uncertainty",
+      };
+    }
+
+    return {
+      status: "candidate",
+      analysisStatus: "awaiting_details",
+      score: totalBuyCost <= 100 ? 45 : 35,
+      recommendation: "REVIEW",
+      reasoning: "Working item to resell without repair",
     };
   }
 
@@ -1104,6 +1144,7 @@ async function scanListings(env) {
     const searchTasks = searches.map((search) => ({
       search,
       query: getSearchTerm(search, scanSlot),
+      dealType: "repair",
     }));
     // One additional rotating niche query per cycle increases coverage
     // without doubling Browse API usage.
@@ -1115,10 +1156,20 @@ async function scanListings(env) {
       const search = rotatingSearches[scanSlot % rotatingSearches.length];
       const query = getSearchTerm(search, scanSlot + 1);
       if (query !== getSearchTerm(search, scanSlot)) {
-        searchTasks.push({ search, query });
+        searchTasks.push({ search, query, dealType: "repair" });
       }
     }
-    for (const { search, query } of searchTasks) {
+    // One working-item flip search per cycle, rotating through categories,
+    // keeps Browse API usage within the daily allowance.
+    if (searches.length) {
+      const search = searches[scanSlot % searches.length];
+      searchTasks.push({
+        search,
+        query: getSearchTerm(search, Math.floor(scanSlot / searches.length)),
+        dealType: "flip",
+      });
+    }
+    for (const { search, query, dealType } of searchTasks) {
       const ebayUrl = new URL(
         "https://api.ebay.com/buy/browse/v1/item_summary/search"
       );
@@ -1134,9 +1185,15 @@ async function scanListings(env) {
         );
       }
 
+      // Flips use fixed-price listings only: an auction's current bid is not
+      // the price the item will sell for.
+      const profileKey = search.profile_key || search.category || search.name;
+      const flipMaxPrice = getCategoryProfile(profileKey)?.flipMaxPrice || search.max_price;
       ebayUrl.searchParams.set(
         "filter",
-        `conditionIds:{7000},itemLocationCountry:US,price:[..${search.max_price}],priceCurrency:USD`
+        dealType === "flip"
+          ? `conditionIds:{3000},buyingOptions:{FIXED_PRICE},itemLocationCountry:US,price:[..${flipMaxPrice}],priceCurrency:USD`
+          : `conditionIds:{7000},itemLocationCountry:US,price:[..${search.max_price}],priceCurrency:USD`
       );
 
       const response = await fetch(ebayUrl, {
@@ -1189,7 +1246,8 @@ async function scanListings(env) {
             item.title || "",
             totalBuyCost,
             search.profile_key || search.category || search.name,
-            shippingQuote === null ? price * 1.06 : totalBuyCost
+            shippingQuote === null ? price * 1.06 : totalBuyCost,
+            dealType
           );
 
           return env.DB.prepare(`
@@ -1210,9 +1268,10 @@ async function scanListings(env) {
               analysis_status,
               deal_score,
               recommendation,
-              reasoning
+              reasoning,
+              deal_type
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).bind(
             item.itemId,
             item.title || "Untitled eBay listing",
@@ -1230,7 +1289,8 @@ async function scanListings(env) {
             classification.analysisStatus,
             classification.score,
             classification.recommendation,
-            classification.reasoning
+            classification.reasoning,
+            dealType
           );
         });
 
@@ -1250,7 +1310,8 @@ async function scanListings(env) {
           fresh_count, new_count, saturated
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
-        runId, search.profile_key || search.category || search.name, query,
+        runId, search.profile_key || search.category || search.name,
+        dealType === "flip" ? `flip: ${query}` : query,
         items.length, searchResultCount, recentItems.length,
         newForSearch, searchSaturated ? 1 : 0
       ).run();
@@ -1521,6 +1582,11 @@ async function createRuntimeTables(env) {
   if (!listingColumns.some((column) => column.name === "item_creation_date")) {
     await env.DB.prepare(
       "ALTER TABLE listings ADD COLUMN item_creation_date TEXT"
+    ).run();
+  }
+  if (!listingColumns.some((column) => column.name === "deal_type")) {
+    await env.DB.prepare(
+      "ALTER TABLE listings ADD COLUMN deal_type TEXT NOT NULL DEFAULT 'repair'"
     ).run();
   }
   await env.DB.prepare(`
@@ -1968,13 +2034,19 @@ function buildDiscordDealPayload(listing) {
           `Local $${Number(listing.estimated_resale_local || 0).toFixed(2)}`,
         inline: true,
       },
-      {
-        name: "Repair",
-        value:
-          `${truncateDiscord(listing.likely_issue || "Unknown", 150)}\n` +
-          `Parts: $${Number(listing.estimated_parts_cost || 0).toFixed(2)}`,
-        inline: true,
-      },
+      listing.deal_type === "flip"
+        ? {
+            name: "Deal type",
+            value: "Working flip\nNo repair planned",
+            inline: true,
+          }
+        : {
+            name: "Repair",
+            value:
+              `${truncateDiscord(listing.likely_issue || "Unknown", 150)}\n` +
+              `Parts: $${Number(listing.estimated_parts_cost || 0).toFixed(2)}`,
+            inline: true,
+          },
       {
         name: "Risk",
         value:
@@ -2452,8 +2524,25 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     };
   }
 
+  const isFlip = listing.deal_type === "flip";
+  const flipEvidence = [listing.title, savedDetails.conditionDescription]
+    .filter(Boolean).join(" ").toLowerCase();
+  if (isFlip && FLIP_FAULT_PATTERN.test(flipEvidence)) {
+    const reason = "Seller's condition notes mention a fault or uncertainty";
+    await env.DB.prepare(`
+      UPDATE listings SET status = 'rejected', analysis_status = 'filtered',
+        deal_score = 0, recommendation = 'PASS', reasoning = ? WHERE id = ?
+    `).bind(reason, listing.id).run();
+    return {
+      status: "Listing rejected before analysis",
+      listing: { title: listing.title, link: listing.item_url, category: listing.category },
+      reason,
+    };
+  }
+
   const listingData = {
     title: listing.title,
+    dealType: isFlip ? "flip" : "repair",
     category: listing.category,
     condition: listing.condition,
     price: listing.price,
@@ -2463,93 +2552,10 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     details: savedDetails,
   };
 
-  const aiResult = await env.AI.run(
-    "@cf/ibm-granite/granite-4.0-h-micro",
-    {
-      messages: [
-        {
-          role: "system",
-          content: `
-You are a conservative electronics repair screener.
-
-Evaluate damaged or nonworking electronics for a DIY repair flipper.
-Never invent facts that are not in the listing.
-Treat liquid damage, device locks, missing motherboards, severe corrosion,
-and unknown board-level failures as high risk.
-Simple replaceable components such as batteries, RAM, storage drives,
-fans, power supplies, lamps, and external adapters are preferable.
-
-Parts estimates must include likely replacement parts and small supplies.
-The comparison search query must identify the exact configuration, not merely
-the broad model family. Include the brand, model number, and any known year,
-generation, processor tier, RAM, or storage capacity needed to avoid mixing
-materially different versions. Use 3 to 10 words. Do not include condition or
-marketplace words such as used, broken, parts, repair, working, or eBay.
-
-repairDifficulty and repairRisk must be numbers from 1 to 10. Do not add
-words or explanations to either number. For example, use 5, not "Moderate",
-and use 8, not "8 - high risk".
-Repair success probability must be an integer percentage from 0 to 100.
-For example, 80 means an 80 percent probability, not 0.80.
-
-Use these approximate repair-success ranges:
-- Missing RAM, SSD, battery, charger, lamp, fan, or another easily
-  replaceable part: 70 to 90
-- A clearly identified minor repair: 65 to 85
-- Powers on but is otherwise untested: 50 to 70
-- No power with an unknown cause: 20 to 45
-- Liquid damage, corrosion, device locks, or suspected board failure: 5 to 25
-
-Only use 0 when the item is effectively irreparable or is missing a critical
-motherboard or main assembly. Do not assume a motherboard failure merely
-because RAM, storage, a battery, or a charger is missing. Do not include an
-expensive speculative motherboard unless the listing provides evidence that
-the motherboard failed.
-
-The explanation must discuss only the actual item, likely repair, evidence,
-repair difficulty, and uncertainty. Do not estimate resale value or profit.
-Never explain how the comparison query was constructed or refer to these
-instructions.
-
-Return only one valid JSON object with these keys:
-itemName, comparisonSearchQuery, likelyIssue, repairDifficulty, repairRisk,
-repairSuccessProbability, partsCostLow, partsCostHigh, laborHours, redFlags,
-reject, rejectReason, explanation. Do not use Markdown.
-          `.trim(),
-        },
-        {
-          role: "user",
-          content:
-            "Analyze this listing:\n" +
-            JSON.stringify(listingData).slice(0, 7000),
-        },
-      ],
-      temperature: 0.1,
-      max_tokens: 650,
-    }
-  );
-
-  await recordAiUsage(env, "screening_calls");
-
-  let analysis;
-  try {
-    analysis = applyDeterministicRepairRules(
-      normalizeRepairAnalysis(validateRepairAnalysis(parseAiResponse(aiResult))),
-      listing,
-      savedDetails
-    );
-  } catch (error) {
-    await env.DB.prepare(`
-      UPDATE listings
-      SET analysis_status = 'needs_review',
-          reasoning = ?
-      WHERE id = ?
-    `).bind(JSON.stringify({
-      error: 'AI screening response could not be trusted',
-      details: String(error.message || error).slice(0, 800),
-    }), listing.id).run();
-    throw error;
-  }
+  // Working flips need no repair diagnosis, so they skip the AI screening.
+  const analysis = isFlip
+    ? getFlipAnalysis(listing)
+    : await screenRepairWithAi(env, listing, listingData, savedDetails);
 
   let comps = {
     count: 0,
@@ -2792,9 +2798,12 @@ reject, rejectReason, explanation. Do not use Markdown.
       ? `${recommendation}: BagSpec found only ${comps.count} valid working comparable listing${comps.count === 1 ? "" : "s"}, so there is not enough reliable market data to estimate resale value. The likely issue is ${analysis.likelyIssue}. Repair difficulty is ${analysis.repairDifficulty}/10, risk is ${repairRisk}/10, and estimated repair success is ${successProbability}%. Estimated parts cost is $${partsCost.toFixed(2)}. This deal is being passed because the resale value cannot be verified and the repair risk is too high.`
       : comps.lowConfidence
         ? `${recommendation}: BagSpec found ${comps.count} possible comparables, but their prices vary too widely to establish a reliable value for this exact configuration. The likely issue is ${analysis.likelyIssue}. Repair difficulty is ${analysis.repairDifficulty}/10, risk is ${repairRisk}/10, and estimated repair success is ${successProbability}%. Estimated parts cost is $${partsCost.toFixed(2)}. This deal is being passed until the exact configuration can be valued confidently.`
+      : isFlip
+        ? `${recommendation}: Working resale flip with no planned repair. BagSpec found ${comps.count} valid working comparables and estimated resale at $${ebayResale.toFixed(2)} on eBay or $${localResale.toFixed(2)} locally, producing an estimated ${recommendedChannel} profit of $${estimatedProfit.toFixed(2)} and an ROI of ${roiPercent.toFixed(1)}%.`
       : `${recommendation}: The likely issue is ${analysis.likelyIssue}. Repair difficulty is ${analysis.repairDifficulty}/10, risk is ${repairRisk}/10, and estimated repair success is ${successProbability}%. BagSpec found ${comps.count} valid working comparables and estimated resale at $${ebayResale.toFixed(2)} on eBay or $${localResale.toFixed(2)} locally. Estimated parts cost is $${partsCost.toFixed(2)}, producing an estimated ${recommendedChannel} profit of $${estimatedProfit.toFixed(2)} and an ROI of ${roiPercent.toFixed(1)}%.`;
 
   const financialBreakdown = {
+    dealType: isFlip ? "flip" : "repair",
     comparisonSearchQuery: analysis.comparisonSearchQuery,
     searchQueriesTried: comps.searchQueriesTried || [],
     comparableCount: comps.count,
@@ -2920,6 +2929,9 @@ realistic for a DIY flipper, the parts estimate is conservative, the working
 comparables match the actual device, and the stated profit has adequate room
 for uncertainty. Reject locks, liquid damage, corrosion, unknown no-power or
 board-level faults, suspicious comparables, and unsupported assumptions.
+For a listing whose dealType is "flip", no repair is planned: approve only
+when the listing describes a complete, working unit with no stated faults
+and the comparables match its exact model and configuration.
 Do not redo arithmetic. Return concise JSON only.
           `.trim(),
         },
@@ -2959,6 +2971,117 @@ Do not redo arithmetic. Return concise JSON only.
     redFlags: Array.isArray(verification.redFlags)
       ? verification.redFlags.map(String).slice(0, 8)
       : [],
+  };
+}
+
+async function screenRepairWithAi(env, listing, listingData, savedDetails) {
+  const aiResult = await env.AI.run(
+    "@cf/ibm-granite/granite-4.0-h-micro",
+    {
+      messages: [
+        {
+          role: "system",
+          content: `
+You are a conservative electronics repair screener.
+
+Evaluate damaged or nonworking electronics for a DIY repair flipper.
+Never invent facts that are not in the listing.
+Treat liquid damage, device locks, missing motherboards, severe corrosion,
+and unknown board-level failures as high risk.
+Simple replaceable components such as batteries, RAM, storage drives,
+fans, power supplies, lamps, and external adapters are preferable.
+
+Parts estimates must include likely replacement parts and small supplies.
+The comparison search query must identify the exact configuration, not merely
+the broad model family. Include the brand, model number, and any known year,
+generation, processor tier, RAM, or storage capacity needed to avoid mixing
+materially different versions. Use 3 to 10 words. Do not include condition or
+marketplace words such as used, broken, parts, repair, working, or eBay.
+
+repairDifficulty and repairRisk must be numbers from 1 to 10. Do not add
+words or explanations to either number. For example, use 5, not "Moderate",
+and use 8, not "8 - high risk".
+Repair success probability must be an integer percentage from 0 to 100.
+For example, 80 means an 80 percent probability, not 0.80.
+
+Use these approximate repair-success ranges:
+- Missing RAM, SSD, battery, charger, lamp, fan, or another easily
+  replaceable part: 70 to 90
+- A clearly identified minor repair: 65 to 85
+- Powers on but is otherwise untested: 50 to 70
+- No power with an unknown cause: 20 to 45
+- Liquid damage, corrosion, device locks, or suspected board failure: 5 to 25
+
+Only use 0 when the item is effectively irreparable or is missing a critical
+motherboard or main assembly. Do not assume a motherboard failure merely
+because RAM, storage, a battery, or a charger is missing. Do not include an
+expensive speculative motherboard unless the listing provides evidence that
+the motherboard failed.
+
+The explanation must discuss only the actual item, likely repair, evidence,
+repair difficulty, and uncertainty. Do not estimate resale value or profit.
+Never explain how the comparison query was constructed or refer to these
+instructions.
+
+Return only one valid JSON object with these keys:
+itemName, comparisonSearchQuery, likelyIssue, repairDifficulty, repairRisk,
+repairSuccessProbability, partsCostLow, partsCostHigh, laborHours, redFlags,
+reject, rejectReason, explanation. Do not use Markdown.
+          `.trim(),
+        },
+        {
+          role: "user",
+          content:
+            "Analyze this listing:\n" +
+            JSON.stringify(listingData).slice(0, 7000),
+        },
+      ],
+      temperature: 0.1,
+      max_tokens: 650,
+    }
+  );
+
+  await recordAiUsage(env, "screening_calls");
+
+  let analysis;
+  try {
+    analysis = applyDeterministicRepairRules(
+      normalizeRepairAnalysis(validateRepairAnalysis(parseAiResponse(aiResult))),
+      listing,
+      savedDetails
+    );
+  } catch (error) {
+    await env.DB.prepare(`
+      UPDATE listings
+      SET analysis_status = 'needs_review',
+          reasoning = ?
+      WHERE id = ?
+    `).bind(JSON.stringify({
+      error: 'AI screening response could not be trusted',
+      details: String(error.message || error).slice(0, 800),
+    }), listing.id).run();
+    throw error;
+  }
+
+  return analysis;
+}
+
+function getFlipAnalysis(listing) {
+  return {
+    itemName: listing.title,
+    comparisonSearchQuery: String(listing.title || "")
+      .trim().split(/\s+/).slice(0, 10).join(" "),
+    likelyIssue: "None: listed as working (resale flip)",
+    repairDifficulty: 1,
+    repairRisk: 2,
+    repairSuccessProbability: 90,
+    partsCostLow: 0,
+    partsCostHigh: 0,
+    laborHours: 0,
+    redFlags: [],
+    reject: false,
+    rejectReason: "",
+    explanation: "Listed as used and working; resell without repair.",
   };
 }
 

@@ -8,7 +8,17 @@ Scanner V2 targets seven repair-friendly categories chosen for resale demand
 in Rexburg, Idaho (BYU-Idaho): laptops, game consoles, graphing calculators,
 headphones, premium portable audio, projectors, and cameras. Local resale is
 the preferred channel; eBay is recommended only when it nets more than $10
-extra. Each category has its own local resale rate in `CATEGORY_PROFILES`. It rejects obvious accessories, obsolete laptops,
+extra. Each category has its own local resale rate in `CATEGORY_PROFILES`.
+
+Two deal types are scanned:
+
+- **Repair**: "For parts or not working" listings, screened by AI for a
+  realistic DIY repair.
+- **Flip**: one Used, fixed-price search per cycle (rotating categories, up
+  to each category's `flipMaxPrice`). Listings that mention any fault or
+  uncertainty are rejected, the AI repair screening is skipped, and profit
+  comes straight from working comparables. Flips are tagged on the
+  dashboard and in Discord alerts. It rejects obvious accessories, obsolete laptops,
 locked devices, liquid damage, bulk lots, and incomplete products before
 spending calls on enrichment or AI analysis.
 
