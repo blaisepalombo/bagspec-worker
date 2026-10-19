@@ -328,69 +328,93 @@ function isAuthorized(request, env) {
   }
 }
 
+// Categories are chosen for resale demand in Rexburg, Idaho (BYU-Idaho):
+// students turn over every semester and buy laptops, consoles, graphing
+// calculators, headphones, speakers, and apartment projectors locally.
+// localResaleRate is the share of the eBay comparable price a working unit
+// typically brings on local marketplaces; eBay remains the fallback channel.
 const CATEGORY_PROFILES = {
   "Business Laptops": {
     ebayCategoryId: "175672",
     minimumComparablePrice: 80,
     outboundShipping: 18,
+    localResaleRate: 0.9,
     requiredTitle:
-      /\b(laptop|notebook|thinkpad|latitude|elitebook|probook|macbook|ideapad|vivobook|zenbook)\b/i,
-  },
-  "Mini PCs": {
-    ebayCategoryId: "171957",
-    minimumComparablePrice: 70,
-    outboundShipping: 12,
-    requiredTitle:
-      /\b(mini\s*pc|mini computer|nuc|optiplex micro|prodesk mini|elitedesk mini|thinkcentre tiny)\b/i,
+      /\b(laptop|notebook|thinkpad|latitude|elitebook|probook|macbook|ideapad|vivobook|zenbook|surface)\b/i,
   },
   "Game Consoles": {
     ebayCategoryId: "139971",
     minimumComparablePrice: 60,
     outboundShipping: 20,
+    localResaleRate: 0.9,
     requiredTitle:
       /\b(console|playstation|ps[2-5]|xbox|nintendo|switch|steam deck|game boy|psp|genesis)\b/i,
   },
-  Projectors: {
-    ebayCategoryId: "22610",
-    minimumComparablePrice: 70,
-    outboundShipping: 24,
-    requiredTitle: /\bprojector\b/i,
+  "Graphing Calculators": {
+    ebayCategoryId: "9972",
+    minimumComparablePrice: 35,
+    outboundShipping: 8,
+    localResaleRate: 0.95,
+    requiredTitle:
+      /\b(ti-?\s?8[349]|ti-?\s?nspire|graphing calculator|fx-?9750|fx-?cg50)\b/i,
+  },
+  Headphones: {
+    ebayCategoryId: "112529",
+    minimumComparablePrice: 50,
+    outboundShipping: 10,
+    localResaleRate: 0.85,
+    requiredTitle:
+      /\b(headphones?|headset|wh-?1000xm\d|quietcomfort|qc\s?(?:35|45|ultra)|airpods max|beats (?:studio|solo))\b/i,
   },
   "Premium Audio": {
     ebayCategoryId: "111694",
     minimumComparablePrice: 55,
     outboundShipping: 18,
+    localResaleRate: 0.85,
     requiredTitle:
       /\b(speaker|soundbar|boombox|sonos|soundlink|charge|flip|xtreme)\b/i,
   },
-  "Label Printers": {
-    ebayCategoryId: "25348",
-    minimumComparablePrice: 65,
-    outboundShipping: 16,
-    requiredTitle:
-      /\b(label printer|thermal printer|label maker|labelwriter|zebra|rollo)\b/i,
+  Projectors: {
+    ebayCategoryId: "22610",
+    minimumComparablePrice: 70,
+    outboundShipping: 24,
+    localResaleRate: 0.8,
+    requiredTitle: /\bprojector\b/i,
+  },
+  Cameras: {
+    ebayCategoryId: "31388",
+    minimumComparablePrice: 80,
+    outboundShipping: 15,
+    localResaleRate: 0.8,
+    requiredTitle: /\b(camera|dslr|mirrorless)\b/i,
   },
 };
 
 const V2_SEARCHES = [
   [101, "Business Laptops", "laptop", "175672", 300],
-  [102, "Mini PCs", "mini pc", "171957", 200],
   [103, "Game Consoles", "console", "139971", 250],
-  [104, "Projectors", "projector", "22610", 180],
+  [107, "Graphing Calculators", "ti-84", "9972", 90],
+  [108, "Headphones", "headphones", "112529", 200],
   [105, "Premium Audio", "speaker", "111694", 180],
-  [106, "Label Printers", "label printer", "25348", 220],
+  [104, "Projectors", "projector", "22610", 180],
+  [109, "Cameras", "camera", "31388", 300],
 ];
 
-// Keep the existing search records: /setup-v2 does not need to be rerun.
+// Run /setup-v2 after changing V2_SEARCHES so the searches table matches.
 // Rotate model-specific terms across scans to reach items whose titles omit
 // generic words such as "console" or "speaker".
 const SEARCH_TERMS = {
-  "Mini PCs": ["mini pc", "nuc", "optiplex micro", "thinkcentre tiny"],
+  "Business Laptops": ["laptop", "macbook", "thinkpad", "surface laptop"],
   "Game Consoles": ["console", "playstation", "xbox", "nintendo switch", "steam deck"],
-  Projectors: ["projector", "epson projector", "benq projector"],
+  "Graphing Calculators": ["ti-84 plus ce", "ti-84 plus", "ti-nspire cx", "graphing calculator"],
+  Headphones: ["headphones", "sony wh-1000xm", "bose quietcomfort", "airpods max"],
   "Premium Audio": ["speaker", "sonos", "soundlink", "soundbar"],
-  "Label Printers": ["label printer", "zebra printer", "dymo labelwriter", "rollo printer"],
+  Projectors: ["projector", "epson projector", "benq projector"],
+  Cameras: ["camera", "canon eos", "sony alpha", "nikon camera", "fujifilm camera"],
 };
+// Selling locally avoids shipping, packing, and return risk, so prefer the
+// local channel unless eBay nets meaningfully more.
+const LOCAL_PREFERENCE_DOLLARS = 10;
 const FRESH_LISTING_HOURS = 12;
 const DAILY_VERIFICATION_LIMIT = 10;
 
@@ -453,7 +477,7 @@ function maxViableBuyCost(resale, category) {
     (ebayNet - roi * (packingCost + outboundShipping)) / (1 + roi)
   );
 
-  const localNet = resale * 0.85 - 5;
+  const localNet = resale * getLocalResaleRate(category) - 5;
   const localMax = Math.min(
     localNet - watchProfit,
     (localNet - roi * (packingCost + 5)) / (1 + roi)
@@ -538,13 +562,27 @@ function getCategoryProfile(category) {
   return CATEGORY_PROFILES[category] || null;
 }
 
+function getLocalResaleRate(category) {
+  return getCategoryProfile(category)?.localResaleRate ?? 0.85;
+}
+
 function getDecisionThresholds(category) {
   const smallerItemCategories = new Set([
-    "Mini PCs",
     "Game Consoles",
+    "Headphones",
     "Premium Audio",
-    "Label Printers",
   ]);
+
+  // Calculators sell for well under $100, so smaller profits still pay.
+  if (category === "Graphing Calculators") {
+    return {
+      buyProfit: 25,
+      buyRoi: 50,
+      watchProfit: 15,
+      watchRoi: 35,
+      targetProfit: 25,
+    };
+  }
 
   if (smallerItemCategories.has(category)) {
     return {
@@ -626,11 +664,12 @@ async function setupScannerV2(env) {
       AND analysis_status IN ('awaiting_details', 'details_ready')
       AND category NOT IN (
         'Business Laptops',
-        'Mini PCs',
         'Game Consoles',
-        'Projectors',
+        'Graphing Calculators',
+        'Headphones',
         'Premium Audio',
-        'Label Printers'
+        'Projectors',
+        'Cameras'
       )
   `).run();
 
@@ -729,12 +768,6 @@ function getCategoryRejectReason(title, category) {
         reason: "Pre-7th-generation Intel laptop is below the target value floor",
       },
     ],
-    "Mini PCs": [
-      {
-        pattern: /\b(thin client|zero client|raspberry pi case)\b/i,
-        reason: "Low-value thin client or component rather than a target mini PC",
-      },
-    ],
     "Game Consoles": [
       {
         pattern:
@@ -756,11 +789,41 @@ function getCategoryRejectReason(title, category) {
         reason: "Audio component or accessory rather than a complete device",
       },
     ],
-    "Label Printers": [
+    "Graphing Calculators": [
       {
         pattern:
-          /\b(labels?|tape|ribbon|printhead|print head|roller|power supply)\s+only\b/i,
-        reason: "Printer supply or component rather than a complete printer",
+          /\b(slide cover|case|cover|charging cable|cable|battery|manual)\s+only\b/i,
+        reason: "Calculator accessory rather than a complete calculator",
+      },
+      {
+        pattern: /\b(?:teacher pack|classroom (?:set|pack))\b/i,
+        reason: "Classroom bundle rather than a single calculator",
+      },
+    ],
+    Headphones: [
+      {
+        pattern:
+          /\b(?:replacement\s+)?(?:ear\s?pads?|ear\s?cushions?|headband (?:cover|cushion)|carrying case)\b/i,
+        reason: "Headphone part or accessory rather than complete headphones",
+      },
+      {
+        pattern: /\b(?:left|right)\s+(?:side|ear|cup)\s+only\b/i,
+        reason: "Single earcup rather than complete headphones",
+      },
+    ],
+    Cameras: [
+      {
+        pattern:
+          /\b(lens|battery grip|grip|strap|bag|case|charger|body cap|lens cap)\s+only\b/i,
+        reason: "Camera accessory rather than a complete camera",
+      },
+      {
+        pattern: /\bcamera\s+(?:bag|strap|case|backpack|cage|rig)\b/i,
+        reason: "Camera accessory rather than a complete camera",
+      },
+      {
+        pattern: /\b(?:disposable|instant|film|trail|security|dash|web)\s?cam(?:era)?\b/i,
+        reason: "Camera type outside the target resale market",
       },
     ],
   };
@@ -939,13 +1002,14 @@ function classifyTitle(title, totalBuyCost, category, screeningCost = totalBuyCo
 
   if (
     category === "Business Laptops" ||
-    category === "Mini PCs" ||
-    category === "Game Consoles"
+    category === "Game Consoles" ||
+    category === "Graphing Calculators"
   ) {
     score += 10;
   } else if (
+    category === "Headphones" ||
     category === "Projectors" ||
-    category === "Label Printers"
+    category === "Cameras"
   ) {
     score += 8;
   } else if (category === "Premium Audio") {
@@ -1629,11 +1693,12 @@ async function getDiagnostics(env) {
             WHEN json_extract(reasoning, '$.comparableLowConfidence') = 1
               THEN 'Uncertain comparable prices'
             WHEN COALESCE(json_extract(reasoning, '$.estimatedProfit'), 0) <
-              CASE WHEN category IN ('Mini PCs', 'Game Consoles', 'Premium Audio', 'Label Printers')
+              CASE WHEN category = 'Graphing Calculators' THEN 25
+                WHEN category IN ('Game Consoles', 'Headphones', 'Premium Audio')
                 THEN 40 ELSE 50 END
               THEN 'Profit below BUY minimum'
             WHEN COALESCE(json_extract(reasoning, '$.roiPercent'), 0) <
-              CASE WHEN category IN ('Mini PCs', 'Game Consoles', 'Premium Audio', 'Label Printers')
+              CASE WHEN category IN ('Game Consoles', 'Headphones', 'Premium Audio')
                 THEN 45 ELSE 50 END
               THEN 'ROI below BUY minimum'
             WHEN COALESCE(json_extract(reasoning, '$.repairSuccessProbability'), 0) < 70
@@ -2534,7 +2599,9 @@ reject, rejectReason, explanation. Do not use Markdown.
       ? Math.min(comps.conservativeResale, modelResale.resale)
       : comps.conservativeResale
   );
-  const localResale = roundMoney(ebayResale * 0.85);
+  const localResale = roundMoney(
+    ebayResale * getLocalResaleRate(listing.category)
+  );
 
   const outboundShipping = getOutboundShippingEstimate(
     listing.category
@@ -2574,9 +2641,10 @@ reject, rejectReason, explanation. Do not use Markdown.
   );
 
   const recommendedChannel =
-    ebayProfit >= localProfit ? "eBay" : "Local";
+    ebayProfit > localProfit + LOCAL_PREFERENCE_DOLLARS ? "eBay" : "Local";
 
-  const estimatedProfit = Math.max(ebayProfit, localProfit);
+  const estimatedProfit =
+    recommendedChannel === "eBay" ? ebayProfit : localProfit;
   const thresholds = getDecisionThresholds(listing.category);
 
   const investment =
@@ -3373,7 +3441,8 @@ async function findWorkingComparables(
   };
 
   const requiredCategoryPattern =
-    categoryPatterns[String(category).toLowerCase()] || null;
+    categoryPatterns[String(category).toLowerCase()] ||
+    categoryProfile?.requiredTitle || null;
 
   const comparableItems = itemSummaries
     .filter((item) => {

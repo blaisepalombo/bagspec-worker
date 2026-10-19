@@ -4,9 +4,11 @@ Cloudflare Worker that scans eBay for repairable electronics, enriches new
 listings, estimates repair risk, checks working comparables, and calculates
 potential resale profit.
 
-Scanner V2 targets six repair-friendly categories with eBay category IDs:
-business laptops, mini PCs, game consoles, projectors, premium portable
-audio, and label printers. It rejects obvious accessories, obsolete laptops,
+Scanner V2 targets seven repair-friendly categories chosen for resale demand
+in Rexburg, Idaho (BYU-Idaho): laptops, game consoles, graphing calculators,
+headphones, premium portable audio, projectors, and cameras. Local resale is
+the preferred channel; eBay is recommended only when it nets more than $10
+extra. Each category has its own local resale rate in `CATEGORY_PROFILES`. It rejects obvious accessories, obsolete laptops,
 locked devices, liquid damage, bulk lots, and incomplete products before
 spending calls on enrichment or AI analysis.
 
