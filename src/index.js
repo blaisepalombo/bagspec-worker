@@ -336,6 +336,9 @@ function isAuthorized(request, env) {
 // localResaleRate is the share of the eBay comparable price a working unit
 // typically brings on local marketplaces; eBay remains the fallback channel.
 // flipMaxPrice caps the working-item (no repair) search for each category.
+// scanEveryMinutes matches search frequency to how often new listings
+// appear: a category with a few fresh listings per 12 hours loses nothing
+// when searched every half hour, and the saved calls go to enrichment.
 const CATEGORY_PROFILES = {
   "Business Laptops": {
     ebayCategoryId: "175672",
@@ -343,6 +346,7 @@ const CATEGORY_PROFILES = {
     outboundShipping: 18,
     localResaleRate: 0.9,
     flipMaxPrice: 400,
+    scanEveryMinutes: 5,
     requiredTitle:
       /\b(laptop|notebook|thinkpad|latitude|elitebook|probook|macbook|ideapad|vivobook|zenbook|surface)\b/i,
   },
@@ -352,6 +356,7 @@ const CATEGORY_PROFILES = {
     outboundShipping: 20,
     localResaleRate: 0.9,
     flipMaxPrice: 350,
+    scanEveryMinutes: 5,
     requiredTitle:
       /\b(console|playstation|ps[2-5]|xbox|nintendo|switch|steam deck|game boy|psp|genesis)\b/i,
   },
@@ -361,6 +366,7 @@ const CATEGORY_PROFILES = {
     outboundShipping: 8,
     localResaleRate: 0.95,
     flipMaxPrice: 70,
+    scanEveryMinutes: 15,
     requiredTitle:
       /\b(ti-?\s?8[349]|ti-?\s?nspire|graphing calculator|fx-?9750|fx-?cg50)\b/i,
   },
@@ -370,6 +376,7 @@ const CATEGORY_PROFILES = {
     outboundShipping: 10,
     localResaleRate: 0.85,
     flipMaxPrice: 200,
+    scanEveryMinutes: 10,
     requiredTitle:
       /\b(headphones?|headset|wh-?1000xm\d|quietcomfort|qc\s?(?:35|45|ultra)|airpods max|beats (?:studio|solo))\b/i,
   },
@@ -379,6 +386,7 @@ const CATEGORY_PROFILES = {
     outboundShipping: 18,
     localResaleRate: 0.85,
     flipMaxPrice: 200,
+    scanEveryMinutes: 30,
     requiredTitle:
       /\b(speaker|soundbar|boombox|sonos|soundlink|charge|flip|xtreme)\b/i,
   },
@@ -388,6 +396,7 @@ const CATEGORY_PROFILES = {
     outboundShipping: 24,
     localResaleRate: 0.8,
     flipMaxPrice: 200,
+    scanEveryMinutes: 30,
     requiredTitle: /\bprojector\b/i,
   },
   Cameras: {
@@ -396,6 +405,7 @@ const CATEGORY_PROFILES = {
     outboundShipping: 15,
     localResaleRate: 0.8,
     flipMaxPrice: 400,
+    scanEveryMinutes: 10,
     // Many camera titles name only the model, e.g. "Canon EOS Rebel T7 Body".
     requiredTitle:
       /\b(camera|dslr|mirrorless|eos|rebel|alpha|a[679]\d{3}|a7[crs]?|nikon\s+(?:d\d{2,4}|z\s?\d{1,2})|x-?[ths]\d{1,2}|lumix)\b/i,
@@ -1196,7 +1206,16 @@ function classifyTitle(
   };
 }
 
+// Application tokens last about two hours; reuse one across the cycle's
+// scan, enrichment, and comparable calls instead of requesting a new one
+// for each.
+let cachedEbayToken = null;
+
 async function getEbayToken(env) {
+  if (cachedEbayToken && cachedEbayToken.expiresAt > Date.now()) {
+    return cachedEbayToken.value;
+  }
+
   const response = await fetch(
     "https://api.ebay.com/identity/v1/oauth2/token",
     {
@@ -1221,6 +1240,11 @@ async function getEbayToken(env) {
   }
 
   const data = await response.json();
+  const lifetimeSeconds = Number(data.expires_in) || 7200;
+  cachedEbayToken = {
+    value: data.access_token,
+    expiresAt: Date.now() + (lifetimeSeconds - 300) * 1000,
+  };
 
   return data.access_token;
 }
@@ -1251,7 +1275,12 @@ async function scanListings(env) {
     let olderOrUndatedIgnored = 0;
 
     const scanSlot = Math.floor(Date.now() / (5 * 60 * 1000));
-    const searchTasks = searches.map((search) => ({
+    const isDue = (search) => {
+      const profile = getCategoryProfile(search.profile_key || search.category || search.name);
+      const every = Math.max(1, Math.round((profile?.scanEveryMinutes || 5) / 5));
+      return (scanSlot + Number(search.id || 0)) % every === 0;
+    };
+    const searchTasks = searches.filter(isDue).map((search) => ({
       search,
       query: getSearchTerm(search, scanSlot),
       dealType: "repair",
@@ -1260,7 +1289,8 @@ async function scanListings(env) {
     // without doubling Browse API usage.
     const rotatingSearches = searches.filter((search) => {
       const category = search.profile_key || search.category || search.name;
-      return (SEARCH_TERMS[category] || []).length > 1;
+      return (SEARCH_TERMS[category] || []).length > 1 &&
+        (getCategoryProfile(category)?.scanEveryMinutes || 5) <= 10;
     });
     if (rotatingSearches.length) {
       const search = rotatingSearches[scanSlot % rotatingSearches.length];
@@ -1565,7 +1595,6 @@ async function prefilterExisting(env) {
 
 async function runAutomatedCycle(env) {
   await ensureRuntimeTables(env);
-  await invalidateUnderpricedProjectorLeads(env);
   const run = await env.DB.prepare(`
     INSERT INTO cycle_runs (status) VALUES ('running')
   `).run();
@@ -1574,8 +1603,8 @@ async function runAutomatedCycle(env) {
 
   const stages = [
     ["scan", () => scanListings(env)],
-    ["enrichment", () => enrichCandidates(env, 3)],
-    ["analysis", () => analyzeCandidateBatch(env, 3)],
+    ["enrichment", () => enrichCandidates(env, 6)],
+    ["analysis", () => analyzeCandidateBatch(env, 4)],
     ["alerts", () => sendPendingDealAlerts(env, 5)],
   ];
 
@@ -2248,18 +2277,6 @@ async function sendPendingDealAlerts(env, limit = 3) {
     ORDER BY item_creation_date DESC, deal_score DESC
     LIMIT ?
   `).bind(`-${FRESH_LISTING_HOURS} hours`, safeLimit).all();
-
-  // Remove previously scored component-only listings from the deals list.
-  await env.DB.prepare(`
-    UPDATE listings
-    SET status = 'rejected', analysis_status = 'filtered',
-      deal_score = 0, recommendation = 'PASS',
-      reasoning = 'Printer part rather than a complete label printer'
-    WHERE category = 'Label Printers'
-      AND recommendation IN ('BUY', 'WATCH')
-      AND (lower(title) LIKE '%printer part - %'
-        OR lower(title) LIKE '%printer part: %')
-  `).run();
 
   const sent = [];
   const failed = [];
@@ -3451,24 +3468,6 @@ function getVerifiedLaptopModel(listing, savedDetails) {
     if (valid.length) return normalizeModelText(valid[0]);
   }
   return null;
-}
-
-async function invalidateUnderpricedProjectorLeads(env) {
-  // Earlier AI estimates priced a genuine PowerLite 118 lamp below Epson's
-  // $76 retail price. Remove those stale leads before sending more alerts.
-  await env.DB.prepare(`
-    UPDATE listings
-    SET status = 'rejected', analysis_status = 'needs_review',
-        recommendation = 'PASS', estimated_parts_cost = 76,
-        estimated_profit = NULL, roi_percent = NULL,
-        suggested_offer = 0, deal_score = 0,
-        reasoning = '{"rejectReason":"Lamp price was underestimated; repair diagnosis unconfirmed. Re-evaluate before buying."}'
-    WHERE category = 'Projectors'
-      AND LOWER(title) LIKE '%powerlite 118%'
-      AND LOWER(COALESCE(likely_issue, '')) LIKE '%lamp%'
-      AND COALESCE(estimated_parts_cost, 0) < 76
-      AND recommendation IN ('BUY', 'WATCH')
-  `).run();
 }
 
 function applyDeterministicRepairRules(
