@@ -396,7 +396,9 @@ const CATEGORY_PROFILES = {
     outboundShipping: 15,
     localResaleRate: 0.8,
     flipMaxPrice: 400,
-    requiredTitle: /\b(camera|dslr|mirrorless)\b/i,
+    // Many camera titles name only the model, e.g. "Canon EOS Rebel T7 Body".
+    requiredTitle:
+      /\b(camera|dslr|mirrorless|eos|rebel|alpha|a[679]\d{3}|a7[crs]?|nikon\s+(?:d\d{2,4}|z\s?\d{1,2})|x-?[ths]\d{1,2}|lumix)\b/i,
   },
 };
 
