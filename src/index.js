@@ -2823,7 +2823,15 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
   // model's resale never exceeds its typical sold price, and other models
   // are discounted.
   let modelResale = matchModelResale(listing.title, listing.category);
-  if (!modelResale && !analysis.reject && comps.count >= 3 && !comps.lowConfidence) {
+  // Sold evidence can only lower the resale estimate, and the lookups are
+  // capped daily, so spend them only on listings that could still reach
+  // BUY: a confirmed repair type, and a cost that clears the WATCH bar at
+  // the asking-price estimate.
+  const couldReachBuy = (isFlip || referencePartsCost !== null) &&
+    listing.total_buy_cost + partsCost <=
+      maxViableBuyCost(comps.conservativeResale, listing.category);
+  if (!modelResale && !analysis.reject && comps.count >= 3 && !comps.lowConfidence &&
+      couldReachBuy) {
     try {
       modelResale = await getSoldEvidence(env, listing.category, comps);
     } catch (error) {
