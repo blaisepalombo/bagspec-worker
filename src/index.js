@@ -227,6 +227,7 @@ export default {
     }
 
     if (url.pathname === "/deals") {
+      await ensureRuntimeTables(env);
       const { results } = await env.DB.prepare(`
         SELECT
           id,
@@ -265,6 +266,7 @@ export default {
     }
 
     if (url.pathname === "/listings") {
+      await ensureRuntimeTables(env);
       const { results } = await env.DB.prepare(`
         SELECT
           id,
@@ -441,7 +443,18 @@ const LOCAL_PREFERENCE_DOLLARS = 10;
 // uncertainty belongs in the repair pipeline instead.
 const FLIP_LISTINGS_PER_SEARCH = 15;
 const FLIP_FAULT_PATTERN =
-  /\b(?:for parts|parts only|not working|broken|cracked|damaged|untested|not tested|unable to test|as[- ]is|read description|no power|won't|doesn't work|does not work|faulty|defective|locked|(?<!no )(?:issues?|problems?))\b/;
+  /\b(?:for parts|parts only|not working|broken|cracked|damaged|untested|not tested|unable to test|as[- ]is|read description|no power|won't|doesn't work|does not work|faulty|defective|locked|issues?|problems?)\b/;
+// Descriptions often carry boilerplate such as "sold as is" or "not
+// responsible for shipping damage", so they are checked for clear faults only.
+const FLIP_DESCRIPTION_FAULT_PATTERN =
+  /\b(?:for parts|not working|broken|cracked|dead pixels?|lines on (?:the )?screen|won't (?:turn on|power|charge|hold|connect|read)|doesn't (?:work|turn on|power|charge|hold|connect|read)|does not (?:work|turn on|power|charge|hold|connect|read)|not (?:charging|holding (?:a )?charge)|faulty|defective|stick drift|drifts?|untested|not tested|(?:issue|problem)s? with)\b/;
+
+// Phrases that deny a fault ("no known issues") must not count as one.
+function flipFaultFound(text, pattern = FLIP_FAULT_PATTERN) {
+  const cleaned = String(text || "").toLowerCase().replace(/[\u2018\u2019]/g, "'")
+    .replace(/\b(?:no|zero|without(?: any)?|not any|free of)\s+(?:known\s+|major\s+|any\s+)?(?:issues?|problems?)\b/g, " ");
+  return pattern.test(cleaned);
+}
 const FRESH_LISTING_HOURS = 12;
 const DAILY_VERIFICATION_LIMIT = 10;
 
@@ -523,24 +536,33 @@ const REPAIR_PARTS = {
   earpads: { Headphones: 15 },
 };
 
-// The listing itself must name the fault; this keeps the AI from inventing
-// a cheap diagnosis such as a "TPM failure" for an unexplained fault.
+// The listing itself must state the fault, in the same clause as the part,
+// not merely mention the part ("comes with battery" is not a battery fault). This keeps the AI from
+// inventing a cheap diagnosis such as a "TPM failure" or a battery swap for
+// an unexplained fault.
+const FAULT_WORDS =
+  "bad|dead|broken|cracked|damaged|failed|failing|faulty|swollen|bulging|weak|worn|torn|peeling|missing|needs?|replace\\w*|won't|doesn't|does not|don't|do not|will not|not working|not charging|no longer|stuck|sticky|loose|lines?|flicker\\w*|stopped";
+function statedFault(part) {
+  return new RegExp(
+    `\\b(?:${FAULT_WORDS})\\b[^.!?,;\\n]{0,30}\\b(?:${part})|\\b(?:${part})\\b[^.!?,;\\n]{0,30}\\b(?:${FAULT_WORDS})\\b`
+  );
+}
 const REPAIR_EVIDENCE = {
   missing_storage: /\b(?:no|missing|without)\s+(?:ssd|hdd|hard\s*drive|storage|drive)\b/,
   missing_ram: /\b(?:no|missing|without)\s+(?:ram|memory)\b/,
   missing_storage_and_ram: /\b(?:no|missing|without)\s+(?:ram|memory)\b[\s\S]*\b(?:ssd|hdd|hard\s*drive|storage|drive)\b|\b(?:no|missing|without)\s+(?:ssd|hdd|hard\s*drive|storage|drive)\b[\s\S]*\b(?:ram|memory)\b/,
-  battery: /\bbatter(?:y|ies)\b/,
+  battery: statedFault("batter(?:y|ies)"),
   charger: /\b(?:no|missing|without)\s+(?:charger|power\s+(?:adapter|cord)|ac\s+adapter|adapter)\b/,
   software: /\b(?:no\s+os|needs?\s+(?:os|windows|reinstall)|boots?\s+to\s+bios|password|reinstall)\b/,
-  fan_or_thermal: /\b(?:fan|overheat\w*|thermal)\b/,
-  keyboard: /\bkeyboard|\bkeys?\b/,
-  screen: /\b(?:screen|lcd|display|panel)\b/,
-  hinge: /\bhinges?\b/,
-  port: /\b(?:hdmi|charging|charge|usb-?c?|power)\s+(?:port|jack)\b/,
+  fan_or_thermal: /\b(?:overheat\w*|thermal\s+shut\w*)\b|\bfan\s+(?:error|noise|noisy|loud|grind\w*|rattl\w*|not\s+spinning|failure|issue)|\b(?:loud|noisy|bad|dead|broken|faulty)\s+fan\b/,
+  keyboard: statedFault("keyboard|keys"),
+  screen: statedFault("screen|lcd|display|panel"),
+  hinge: statedFault("hinges?"),
+  port: statedFault("(?:hdmi|charging|charge|usb-?c?|power)\\s+(?:port|jack)"),
   joycon_drift: /\bdrift\w*\b/,
-  disc_drive: /\b(?:disc|disk|optical)\s+drive|\bread(?:ing)?\s+discs?\b/,
-  lamp: /\b(?:lamp|bulb)\b/,
-  earpads: /\b(?:ear\s?pads?|ear\s?cushions?|cushions?)\b/,
+  disc_drive: statedFault("(?:disc|disk|optical)\\s+drive|discs?"),
+  lamp: statedFault("lamp|bulb"),
+  earpads: statedFault("ear\\s?pads?|ear\\s?cushions?|cushions?"),
 };
 
 function isMacBook(title) {
@@ -1070,7 +1092,7 @@ function classifyTitle(
   }
 
   if (dealType === "flip") {
-    if (FLIP_FAULT_PATTERN.test(text)) {
+    if (flipFaultFound(text)) {
       return {
         status: "rejected",
         analysisStatus: "filtered",
@@ -1275,14 +1297,16 @@ async function scanListings(env) {
     let olderOrUndatedIgnored = 0;
 
     const scanSlot = Math.floor(Date.now() / (5 * 60 * 1000));
-    const isDue = (search) => {
-      const profile = getCategoryProfile(search.profile_key || search.category || search.name);
-      const every = Math.max(1, Math.round((profile?.scanEveryMinutes || 5) / 5));
-      return (scanSlot + Number(search.id || 0)) % every === 0;
-    };
+    const scanEvery = (search) => Math.max(1, Math.round(
+      (getCategoryProfile(search.profile_key || search.category || search.name)
+        ?.scanEveryMinutes || 5) / 5));
+    const isDue = (search) =>
+      (scanSlot + Number(search.id || 0)) % scanEvery(search) === 0;
+    // Count only this search's own runs so every term gets its turn even
+    // when the cadence and the number of terms share a factor.
     const searchTasks = searches.filter(isDue).map((search) => ({
       search,
-      query: getSearchTerm(search, scanSlot),
+      query: getSearchTerm(search, Math.floor(scanSlot / scanEvery(search))),
       dealType: "repair",
     }));
     // One additional rotating niche query per cycle increases coverage
@@ -1294,8 +1318,9 @@ async function scanListings(env) {
     });
     if (rotatingSearches.length) {
       const search = rotatingSearches[scanSlot % rotatingSearches.length];
-      const query = getSearchTerm(search, scanSlot + 1);
-      if (query !== getSearchTerm(search, scanSlot)) {
+      const ownSlot = Math.floor(scanSlot / scanEvery(search));
+      const query = getSearchTerm(search, ownSlot + 1);
+      if (query !== getSearchTerm(search, ownSlot)) {
         searchTasks.push({ search, query, dealType: "repair" });
       }
     }
@@ -1326,13 +1351,14 @@ async function scanListings(env) {
       }
 
       // Flips use fixed-price listings only: an auction's current bid is not
-      // the price the item will sell for.
+      // the price the item will sell for. The price floor keeps accessories
+      // from filling the cheapest-first flip slots.
       const profileKey = search.profile_key || search.category || search.name;
       const flipMaxPrice = getCategoryProfile(profileKey)?.flipMaxPrice || search.max_price;
       ebayUrl.searchParams.set(
         "filter",
         dealType === "flip"
-          ? `conditionIds:{3000},buyingOptions:{FIXED_PRICE},itemLocationCountry:US,price:[..${flipMaxPrice}],priceCurrency:USD`
+          ? `conditionIds:{3000},buyingOptions:{FIXED_PRICE},itemLocationCountry:US,price:[${getCategoryProfile(profileKey)?.minimumComparablePrice || 0}..${flipMaxPrice}],priceCurrency:USD`
           : `conditionIds:{7000},itemLocationCountry:US,price:[..${search.max_price}],priceCurrency:USD`
       );
 
@@ -1417,9 +1443,10 @@ async function scanListings(env) {
               deal_score,
               recommendation,
               reasoning,
-              deal_type
+              deal_type,
+              seller
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).bind(
             item.itemId,
             item.title || "Untitled eBay listing",
@@ -1438,7 +1465,8 @@ async function scanListings(env) {
             classification.score,
             classification.recommendation,
             classification.reasoning,
-            dealType
+            dealType,
+            item.seller?.username || null
           );
         });
 
@@ -1730,6 +1758,9 @@ async function createRuntimeTables(env) {
     await env.DB.prepare(
       "ALTER TABLE listings ADD COLUMN item_creation_date TEXT"
     ).run();
+  }
+  if (!listingColumns.some((column) => column.name === "seller")) {
+    await env.DB.prepare("ALTER TABLE listings ADD COLUMN seller TEXT").run();
   }
   if (!listingColumns.some((column) => column.name === "deal_type")) {
     await env.DB.prepare(
@@ -2666,13 +2697,14 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
   }
 
   // A seller relisting the same item at the same or a higher price means it
-  // did not sell there, so it is not underpriced.
-  const relisted = await env.DB.prepare(`
+  // did not sell there, so it is not underpriced. Matching the seller keeps
+  // different sellers' identical generic titles apart.
+  const relisted = listing.seller && await env.DB.prepare(`
     SELECT 1 FROM listings
-    WHERE title = ? AND id <> ? AND price <= ?
+    WHERE title = ? AND seller = ? AND id <> ? AND price <= ?
       AND first_seen_at <= datetime(?, '-3 days')
     LIMIT 1
-  `).bind(listing.title, listing.id, listing.price, listing.first_seen_at).first();
+  `).bind(listing.title, listing.seller, listing.id, listing.price, listing.first_seen_at).first();
   if (relisted) {
     const reason = "Relisted at the same or a lower earlier price; it has not sold";
     await env.DB.prepare(`
@@ -2705,8 +2737,11 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
 
   const isFlip = listing.deal_type === "flip";
   const flipEvidence = [listing.title, savedDetails.conditionDescription]
-    .filter(Boolean).join(" ").toLowerCase();
-  if (isFlip && FLIP_FAULT_PATTERN.test(flipEvidence)) {
+    .filter(Boolean).join(" ");
+  const flipDescription = [savedDetails.shortDescription, savedDetails.fullDescription]
+    .filter(Boolean).join(" ").replace(/<[^>]*>/g, " ");
+  if (isFlip && (flipFaultFound(flipEvidence) ||
+      flipFaultFound(flipDescription, FLIP_DESCRIPTION_FAULT_PATTERN))) {
     const reason = "Seller's condition notes mention a fault or uncertainty";
     await env.DB.prepare(`
       UPDATE listings SET status = 'rejected', analysis_status = 'filtered',
@@ -2753,7 +2788,8 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
       env,
       analysis.comparisonSearchQuery,
       listing.category,
-      laptopModel
+      laptopModel,
+      listing.ebay_item_id
     );
   }
 
@@ -3596,7 +3632,8 @@ async function findWorkingComparables(
   env,
   searchQuery,
   category = "",
-  requiredModel = null
+  requiredModel = null,
+  excludedItemId = null
 ) {
   const accessToken = await getEbayToken(env);
   const categoryProfile = getCategoryProfile(category);
@@ -3648,8 +3685,10 @@ async function findWorkingComparables(
     searchUrl.searchParams.set(
       "filter",
       // Sorting by price would otherwise fill the results with accessories
-      // and parts priced below any complete working unit.
-      `conditions:{USED},itemLocationCountry:US,price:[${minimumComparablePrice}..],priceCurrency:USD`
+      // and parts priced below any complete working unit. The API filters on
+      // item price without shipping, so the floor is loosened here and the
+      // exact floor is applied to price plus shipping below.
+      `conditions:{USED},itemLocationCountry:US,price:[${Math.floor(minimumComparablePrice * 0.6)}..],priceCurrency:USD`
     );
 
     const response = await fetch(searchUrl, {
@@ -3779,6 +3818,8 @@ async function findWorkingComparables(
     .filter((item) => {
       const title = String(item.title || "");
       const normalizedTitle = normalize(title);
+      // A working flip must not be priced against its own listing.
+      if (excludedItemId && item.itemId === excludedItemId) return false;
       if (requiredModel && !normalizedTitle.includes(requiredModel)) return false;
       const condition = String(item.condition || "").toLowerCase();
       const buyingOptions = item.buyingOptions || [];
