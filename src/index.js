@@ -511,6 +511,8 @@ const SOLD_EVIDENCE_DAILY_LOOKUPS = 150;
 const SOLD_EVIDENCE_LISTINGS_PER_MODEL = 8;
 const SOLD_EVIDENCE_MIN_SALES = 5;
 const SOLD_EVIDENCE_MIN_LISTINGS = 2;
+// One listing can stand alone when it has sold this many units.
+const SOLD_EVIDENCE_SINGLE_LISTING_SALES = 10;
 const SOLD_EVIDENCE_RATE = 0.9;
 
 // Conservative parts-and-supplies costs by repair type. The AI only names
@@ -4054,7 +4056,9 @@ async function getSoldEvidence(env, category, comps) {
 
   const salesCount = sales.reduce((sum, sale) => sum + sale.sold, 0);
   let soldPrice = null;
-  if (salesCount >= SOLD_EVIDENCE_MIN_SALES && sales.length >= SOLD_EVIDENCE_MIN_LISTINGS) {
+  if (salesCount >= SOLD_EVIDENCE_MIN_SALES &&
+      (sales.length >= SOLD_EVIDENCE_MIN_LISTINGS ||
+        salesCount >= SOLD_EVIDENCE_SINGLE_LISTING_SALES)) {
     // Sales-weighted lower quartile of the prices units actually sold at.
     let cumulative = 0;
     const lowerQuartile = sales.find((sale) =>

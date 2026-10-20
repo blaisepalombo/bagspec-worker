@@ -25,7 +25,7 @@ A BUY needs evidence, not just an estimate:
 - **Sold-price reference**: the model must match `MODEL_RESALE`, a table of
   recent typical sold prices, or have automatic sold evidence: multi-quantity
   comparable listings whose eBay-reported sold quantities total at least 5
-  units. That evidence uses the sales-weighted lower quartile, discounted
+  units across 2 listings, or 10 units on one. That evidence uses the sales-weighted lower quartile, discounted
   10%, cached per model for 14 days (7 when no evidence was found), and at
   most 150 item lookups a day. Other models are valued from active asking
   prices discounted by `UNREFERENCED_SOLD_RATE` and can reach WATCH only.
