@@ -481,6 +481,15 @@ const MODEL_RESALE = [
 // for EUR 175). Such estimates are discounted and can reach WATCH, never BUY.
 const UNREFERENCED_SOLD_RATE = 0.8;
 
+// Sold-quantity evidence (see getSoldEvidence). Sellers with many sales are
+// mostly refurbishers whose units carry a warranty, so their prices run
+// above a typical used sale and are discounted.
+const SOLD_EVIDENCE_DAILY_LOOKUPS = 150;
+const SOLD_EVIDENCE_LISTINGS_PER_MODEL = 8;
+const SOLD_EVIDENCE_MIN_SALES = 5;
+const SOLD_EVIDENCE_MIN_LISTINGS = 2;
+const SOLD_EVIDENCE_RATE = 0.9;
+
 // Conservative parts-and-supplies costs by repair type. The AI only names
 // the repair type; it never sets the price. A repair type missing here, or
 // not named in the listing itself, can reach WATCH but never BUY.
@@ -1707,6 +1716,25 @@ async function createRuntimeTables(env) {
   `).run();
 
   await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS sold_evidence (
+      evidence_key TEXT PRIMARY KEY,
+      category TEXT NOT NULL,
+      query TEXT NOT NULL,
+      sold_price REAL,
+      sales_count INTEGER NOT NULL,
+      listing_count INTEGER NOT NULL,
+      checked_at TEXT NOT NULL
+    )
+  `).run();
+
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS ebay_usage (
+      usage_day TEXT PRIMARY KEY,
+      sold_lookups INTEGER NOT NULL DEFAULT 0
+    )
+  `).run();
+
+  await env.DB.prepare(`
     CREATE TABLE IF NOT EXISTS system_events (
       event_key TEXT PRIMARY KEY,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -2739,7 +2767,14 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
   // Asking prices run well above what items actually sell for, so a known
   // model's resale never exceeds its typical sold price, and other models
   // are discounted.
-  const modelResale = matchModelResale(listing.title, listing.category);
+  let modelResale = matchModelResale(listing.title, listing.category);
+  if (!modelResale && !analysis.reject && comps.count >= 3 && !comps.lowConfidence) {
+    try {
+      modelResale = await getSoldEvidence(env, listing.category, comps);
+    } catch (error) {
+      console.error("Sold evidence lookup failed", error);
+    }
+  }
   const ebayResale = roundMoney(
     modelResale
       ? Math.min(comps.conservativeResale, modelResale.resale)
@@ -2969,7 +3004,13 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     estimatedPartsCost: partsCost,
     riskReserve,
     modelSoldReference: modelResale
-      ? { model: modelResale.model, typicalSoldPrice: modelResale.resale, checked: MODEL_RESALE_CHECKED }
+      ? {
+          model: modelResale.model,
+          typicalSoldPrice: modelResale.resale,
+          checked: modelResale.checked || MODEL_RESALE_CHECKED,
+          source: modelResale.source || "BagSpec sold-price table",
+          sales: modelResale.sales ?? null,
+        }
       : null,
     ebayResale,
     localResale,
@@ -3836,6 +3877,7 @@ async function findWorkingComparables(
         : 0;
 
       return {
+        itemId: item.itemId || null,
         title: item.title,
         price: roundMoney(price),
         shipping: roundMoney(shipping),
@@ -3907,6 +3949,101 @@ async function findWorkingComparables(
     conservativeResale: lowConfidence
       ? 0
       : roundMoney(lowerQuartile * 0.9),
+    salesSample: pickSpread(cleanedItems, SOLD_EVIDENCE_LISTINGS_PER_MODEL),
+  };
+}
+
+function pickSpread(items, count) {
+  if (items.length <= count) return items.slice();
+  return Array.from({ length: count }, (_, index) =>
+    items[Math.floor((index * (items.length - 1)) / (count - 1))]);
+}
+
+// Multi-quantity fixed-price listings report how many units sold at their
+// price, which is real sales evidence available through the Browse API.
+// Results are cached per comparison query so each model costs only a few
+// item lookups every two weeks.
+async function getSoldEvidence(env, category, comps) {
+  const query = String(comps.searchQueriesTried?.[0] || "").toLowerCase();
+  const sample = (comps.salesSample || []).filter((item) => item.itemId);
+  if (!query || !sample.length) return null;
+  const evidenceKey = `${category}|${query}`;
+
+  const cached = await env.DB.prepare(`
+    SELECT sold_price, sales_count, listing_count, checked_at
+    FROM sold_evidence
+    WHERE evidence_key = ?
+      AND checked_at >= datetime('now',
+        CASE WHEN sold_price IS NULL THEN '-7 days' ELSE '-14 days' END)
+  `).bind(evidenceKey).first();
+  if (cached) return soldEvidenceReference(query, cached);
+
+  const usage = await env.DB.prepare(`
+    SELECT sold_lookups FROM ebay_usage WHERE usage_day = date('now')
+  `).first();
+  if (Number(usage?.sold_lookups || 0) + sample.length > SOLD_EVIDENCE_DAILY_LOOKUPS) {
+    return null;
+  }
+
+  await env.DB.prepare(`
+    INSERT INTO ebay_usage (usage_day, sold_lookups) VALUES (date('now'), ?)
+    ON CONFLICT(usage_day) DO UPDATE SET sold_lookups = sold_lookups + excluded.sold_lookups
+  `).bind(sample.length).run();
+
+  const accessToken = await getEbayToken(env);
+  const sales = (await Promise.all(sample.map(async (item) => {
+    const response = await fetch(
+      "https://api.ebay.com/buy/browse/v1/item/" + encodeURIComponent(item.itemId),
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+          "X-EBAY-C-ENDUSERCTX": ebayBuyerContext(env),
+        },
+      }
+    );
+    if (!response.ok) return null;
+    const details = await response.json();
+    const sold = Math.max(0, ...(details.estimatedAvailabilities || [])
+      .map((availability) => Number(availability.estimatedSoldQuantity) || 0));
+    // Cap each listing's weight so one large refurbisher cannot set the price.
+    return sold > 0 ? { total: item.total, sold: Math.min(sold, 20) } : null;
+  }))).filter(Boolean).sort((a, b) => a.total - b.total);
+
+  const salesCount = sales.reduce((sum, sale) => sum + sale.sold, 0);
+  let soldPrice = null;
+  if (salesCount >= SOLD_EVIDENCE_MIN_SALES && sales.length >= SOLD_EVIDENCE_MIN_LISTINGS) {
+    // Sales-weighted lower quartile of the prices units actually sold at.
+    let cumulative = 0;
+    const lowerQuartile = sales.find((sale) =>
+      (cumulative += sale.sold) >= salesCount * 0.25).total;
+    soldPrice = roundMoney(lowerQuartile * SOLD_EVIDENCE_RATE);
+  }
+
+  await env.DB.prepare(`
+    INSERT INTO sold_evidence (evidence_key, category, query, sold_price,
+      sales_count, listing_count, checked_at)
+    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(evidence_key) DO UPDATE SET
+      sold_price = excluded.sold_price, sales_count = excluded.sales_count,
+      listing_count = excluded.listing_count, checked_at = excluded.checked_at
+  `).bind(evidenceKey, category, query, soldPrice, salesCount, sales.length).run();
+
+  return soldEvidenceReference(query, {
+    sold_price: soldPrice, sales_count: salesCount, listing_count: sales.length,
+    checked_at: new Date().toISOString().slice(0, 10),
+  });
+}
+
+function soldEvidenceReference(query, row) {
+  if (row.sold_price === null || row.sold_price === undefined) return null;
+  return {
+    model: query,
+    resale: Number(row.sold_price),
+    sales: Number(row.sales_count),
+    listings: Number(row.listing_count),
+    checked: String(row.checked_at).slice(0, 10),
+    source: "eBay sold quantities on comparable listings",
   };
 }
 
