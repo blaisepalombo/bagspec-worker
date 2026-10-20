@@ -466,7 +466,76 @@ const MODEL_RESALE = [
   // Lower of the gray ($95, 19 sales) and turquoise ($106, 16 sales) medians.
   { model: "Nintendo Switch Lite", resale: 95, sales: 19,
     pattern: /\bswitch\s+lite\b/ },
-].map((entry) => ({ category: "Game Consoles", ...entry }));
+].map((entry) => ({ category: "Game Consoles", ...entry })).concat([
+  // pcprice.watch eBay sold medians (June and October 2026): T480 EUR 175,
+  // T470 EUR 140; one US i5/8GB/256GB T480 sold for $149.99 in August 2026.
+  // Rounded down toward the US sale for working i5 units.
+  { model: "ThinkPad T480", resale: 160, pattern: /\bt480\b/ },
+  { model: "ThinkPad T470", resale: 130, pattern: /\bt470\b/ },
+].map((entry) => ({ category: "Business Laptops", ...entry })));
+
+// Without a sold reference, resale comes from active asking prices, which
+// run well above what items sell for (T480 listings ask EUR 257-375 but sell
+// for EUR 175). Such estimates are discounted and can reach WATCH, never BUY.
+const UNREFERENCED_SOLD_RATE = 0.8;
+
+// Conservative parts-and-supplies costs by repair type. The AI only names
+// the repair type; it never sets the price. A repair type missing here, or
+// not named in the listing itself, can reach WATCH but never BUY.
+const REPAIR_PARTS_CHECKED = "2026-10-20";
+const REPAIR_PARTS = {
+  missing_storage: { default: 25 },
+  missing_ram: { default: 20 },
+  missing_storage_and_ram: { default: 45 },
+  battery: { "Business Laptops": 45, MacBook: 85, "Game Consoles": 25,
+    "Graphing Calculators": 15, Headphones: 20, "Premium Audio": 25, Cameras: 30 },
+  charger: { "Business Laptops": 20, MacBook: 35, default: 15 },
+  software: { default: 0 },
+  fan_or_thermal: { default: 20 },
+  keyboard: { "Business Laptops": 35, MacBook: 150 },
+  screen: { "Business Laptops": 75, MacBook: 300, Cameras: 60 },
+  hinge: { "Business Laptops": 30 },
+  port: { default: 15 },
+  joycon_drift: { "Game Consoles": 12 },
+  disc_drive: { "Game Consoles": 35 },
+  lamp: { Projectors: 60 },
+  earpads: { Headphones: 15 },
+};
+
+// The listing itself must name the fault; this keeps the AI from inventing
+// a cheap diagnosis such as a "TPM failure" for an unexplained fault.
+const REPAIR_EVIDENCE = {
+  missing_storage: /\b(?:no|missing|without)\s+(?:ssd|hdd|hard\s*drive|storage|drive)\b/,
+  missing_ram: /\b(?:no|missing|without)\s+(?:ram|memory)\b/,
+  missing_storage_and_ram: /\b(?:no|missing|without)\s+(?:ram|memory)\b[\s\S]*\b(?:ssd|hdd|hard\s*drive|storage|drive)\b|\b(?:no|missing|without)\s+(?:ssd|hdd|hard\s*drive|storage|drive)\b[\s\S]*\b(?:ram|memory)\b/,
+  battery: /\bbatter(?:y|ies)\b/,
+  charger: /\b(?:no|missing|without)\s+(?:charger|power\s+(?:adapter|cord)|ac\s+adapter|adapter)\b/,
+  software: /\b(?:no\s+os|needs?\s+(?:os|windows|reinstall)|boots?\s+to\s+bios|password|reinstall)\b/,
+  fan_or_thermal: /\b(?:fan|overheat\w*|thermal)\b/,
+  keyboard: /\bkeyboard|\bkeys?\b/,
+  screen: /\b(?:screen|lcd|display|panel)\b/,
+  hinge: /\bhinges?\b/,
+  port: /\b(?:hdmi|charging|charge|usb-?c?|power)\s+(?:port|jack)\b/,
+  joycon_drift: /\bdrift\w*\b/,
+  disc_drive: /\b(?:disc|disk|optical)\s+drive|\bread(?:ing)?\s+discs?\b/,
+  lamp: /\b(?:lamp|bulb)\b/,
+  earpads: /\b(?:ear\s?pads?|ear\s?cushions?|cushions?)\b/,
+};
+
+function isMacBook(title) {
+  return /\bmacbook\b/i.test(String(title || ""));
+}
+
+// Returns the reference parts cost, or null when the repair is unknown for
+// this item or the listing does not state the fault.
+function getRepairPartsCost(faultType, listing, evidence) {
+  const prices = REPAIR_PARTS[faultType];
+  if (!prices || !REPAIR_EVIDENCE[faultType]?.test(evidence)) return null;
+  const key = isMacBook(listing.title) && prices.MacBook !== undefined
+    ? "MacBook"
+    : listing.category;
+  return prices[key] ?? prices.default ?? null;
+}
 
 function matchModelResale(title, category) {
   const text = String(title || "").toLowerCase();
@@ -570,6 +639,33 @@ function getSellerRejectReason(listing, details = {}) {
   if (listing.category === "Business Laptops" &&
       /\b(?:thinkpad\s+[rtx]6[01]|core\s*2\s*duo|pentium\s*[34]|celeron\s*m)\b/.test(text))
     return "Vintage laptop has insufficient resale room for this repair workflow";
+  if (listing.category === "Business Laptops") return getOldLaptopReason(listing, details);
+  return null;
+}
+
+// Laptops released before 2017 (pre-7th-generation Intel) or with
+// low-end processors rarely sell for enough to cover a repair. Item
+// specifics catch the many titles that omit the processor or year.
+function getOldLaptopReason(listing, details = {}) {
+  const specifics = details.itemSpecifics || {};
+  const cpu = String(specifics.Processor || "").toLowerCase().trim();
+  const title = String(listing.title || "").toLowerCase();
+  const text = title + " " + cpu;
+  const releaseYear = Number(specifics["Release Year"]);
+
+  if (/^(?:not included|no|none|n\/a|missing)$/.test(cpu))
+    return "Processor or logic board is not included";
+  if (/\b(?:celeron|pentium|atom|turion|athlon|sempron|core\s*2|core duo|amd a\d{1,2}|windows\s+(?:xp|vista|7|8))\b/.test(text))
+    return "Low-end or obsolete platform has too little resale value";
+  const generation = cpu.match(/\b(\d{1,2})(?:st|nd|rd|th)\s+gen\b/);
+  if ((generation && Number(generation[1]) < 7) ||
+      /\bi[357][- ]?[2-6]\d{3}[a-z]{0,2}\b/.test(text))
+    return "Pre-7th-generation Intel laptop is below the target value floor";
+  if ((Number.isFinite(releaseYear) && releaseYear > 1990 && releaseYear < 2017) ||
+      /\b(?:200\d|201[0-6])\b/.test(title))
+    return "Laptop released before 2017 is below the target value floor";
+  if (/\b(?:latitude\s+(?:rugged\s+)?[57]4[01]4|latitude\s+e\d{4}|thinkpad\s+[tlxw][2-5][0-6]0[sp]?|elitebook\s+\d{3,4}[a-z]?\s+g[1-3]|elitebook\s+\d{4}[pw]|probook\s+\d{3}\s+g[1-3]|compaq|a1(?:181|278|286|297|342|369|370|398|465|466|502))\b/.test(title))
+    return "Laptop model predates 2017 and is below the target value floor";
   return null;
 }
 
@@ -1647,6 +1743,8 @@ async function createRuntimeTables(env) {
 }
 
 const LISTING_INDEXES = [
+  `CREATE INDEX IF NOT EXISTS idx_listings_title
+    ON listings (title)`,
   `CREATE INDEX IF NOT EXISTS idx_listings_queue
     ON listings (status, analysis_status, item_creation_date)`,
   `CREATE INDEX IF NOT EXISTS idx_listings_recommendation
@@ -2039,7 +2137,9 @@ function buildDiscordDealPayload(listing) {
         inline: true,
       },
       {
-        name: "Resale (asking-price estimate)",
+        name: financials.modelSoldReference
+          ? "Resale (capped at sold price)"
+          : "Resale (asking-price estimate)",
         value:
           `eBay $${Number(listing.estimated_resale_ebay || 0).toFixed(2)}\n` +
           `Local $${Number(listing.estimated_resale_local || 0).toFixed(2)}`,
@@ -2518,6 +2618,27 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     };
   }
 
+  // A seller relisting the same item at the same or a higher price means it
+  // did not sell there, so it is not underpriced.
+  const relisted = await env.DB.prepare(`
+    SELECT 1 FROM listings
+    WHERE title = ? AND id <> ? AND price <= ?
+      AND first_seen_at <= datetime(?, '-3 days')
+    LIMIT 1
+  `).bind(listing.title, listing.id, listing.price, listing.first_seen_at).first();
+  if (relisted) {
+    const reason = "Relisted at the same or a lower earlier price; it has not sold";
+    await env.DB.prepare(`
+      UPDATE listings SET status = 'rejected', analysis_status = 'filtered',
+        deal_score = 0, recommendation = 'PASS', reasoning = ? WHERE id = ?
+    `).bind(reason, listing.id).run();
+    return {
+      status: "Listing rejected before analysis",
+      listing: { title: listing.title, link: listing.item_url, category: listing.category },
+      reason,
+    };
+  }
+
   // Recheck against the verified, destination-specific buy cost from
   // enrichment before spending an AI call.
   const priceReason = getModelPriceRejectReason(
@@ -2589,10 +2710,15 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     );
   }
 
+  const repairEvidence = getSellerEvidence(listing, savedDetails);
+  const referencePartsCost = isFlip
+    ? 0
+    : getRepairPartsCost(analysis.faultType, listing, repairEvidence);
   const partsCost = roundMoney(
     Math.max(
       Number(analysis.partsCostLow) || 0,
-      Number(analysis.partsCostHigh) || 0
+      Number(analysis.partsCostHigh) || 0,
+      referencePartsCost || 0
     )
   );
 
@@ -2608,14 +2734,20 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     100
   );
 
-  // Asking prices can run well above what consoles actually sell for, so a
-  // known model's resale never exceeds its typical sold price.
+  // Asking prices run well above what items actually sell for, so a known
+  // model's resale never exceeds its typical sold price, and other models
+  // are discounted.
   const modelResale = matchModelResale(listing.title, listing.category);
   const ebayResale = roundMoney(
     modelResale
       ? Math.min(comps.conservativeResale, modelResale.resale)
-      : comps.conservativeResale
+      : comps.conservativeResale * UNREFERENCED_SOLD_RATE
   );
+
+  const buyBlockedBy = [];
+  if (!modelResale) buyBlockedBy.push("no sold-price reference for this model");
+  if (referencePartsCost === null)
+    buyBlockedBy.push("repair type is unconfirmed or has no parts-price reference");
   const localResale = roundMoney(
     ebayResale * getLocalResaleRate(listing.category)
   );
@@ -2681,6 +2813,7 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
 
   if (
     !analysis.reject &&
+    buyBlockedBy.length === 0 &&
     !comps.lowConfidence &&
     comps.count >= 3 &&
     estimatedProfit >= thresholds.buyProfit &&
@@ -2813,8 +2946,17 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
         ? `${recommendation}: Working resale flip with no planned repair. BagSpec found ${comps.count} valid working comparables and estimated resale at $${ebayResale.toFixed(2)} on eBay or $${localResale.toFixed(2)} locally, producing an estimated ${recommendedChannel} profit of $${estimatedProfit.toFixed(2)} and an ROI of ${roiPercent.toFixed(1)}%.`
       : `${recommendation}: The likely issue is ${analysis.likelyIssue}. Repair difficulty is ${analysis.repairDifficulty}/10, risk is ${repairRisk}/10, and estimated repair success is ${successProbability}%. BagSpec found ${comps.count} valid working comparables and estimated resale at $${ebayResale.toFixed(2)} on eBay or $${localResale.toFixed(2)} locally. Estimated parts cost is $${partsCost.toFixed(2)}, producing an estimated ${recommendedChannel} profit of $${estimatedProfit.toFixed(2)} and an ROI of ${roiPercent.toFixed(1)}%.`;
 
+  const explanationWithLimits =
+    recommendation === "WATCH" && buyBlockedBy.length
+      ? `${finalExplanation} Not eligible for BUY: ${buyBlockedBy.join("; ")}.`
+      : finalExplanation;
+
   const financialBreakdown = {
     dealType: isFlip ? "flip" : "repair",
+    faultType: analysis.faultType,
+    referencePartsCost,
+    partsReferenceChecked: REPAIR_PARTS_CHECKED,
+    buyBlockedBy,
     comparisonSearchQuery: analysis.comparisonSearchQuery,
     searchQueriesTried: comps.searchQueriesTried || [],
     comparableCount: comps.count,
@@ -2843,7 +2985,7 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     repairSuccessProbability: successProbability,
     redFlags: analysis.redFlags,
     finalVerification: verification,
-    explanation: finalExplanation,
+    explanation: explanationWithLimits,
     rejectReason: analysis.rejectReason,
   };
 
@@ -2922,7 +3064,7 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
       finalVerification: verification,
     },
     redFlags: analysis.redFlags,
-    explanation: finalExplanation,
+    explanation: explanationWithLimits,
   };
 }
 
@@ -3034,10 +3176,16 @@ repair difficulty, and uncertainty. Do not estimate resale value or profit.
 Never explain how the comparison query was constructed or refer to these
 instructions.
 
+faultType names the repair and must be exactly one of: missing_storage,
+missing_ram, missing_storage_and_ram, battery, charger, software,
+fan_or_thermal, keyboard, screen, hinge, port, joycon_drift, disc_drive,
+lamp, earpads, other. Use other when the listing does not plainly state the
+fault, or when it states more than one unrelated fault.
+
 Return only one valid JSON object with these keys:
-itemName, comparisonSearchQuery, likelyIssue, repairDifficulty, repairRisk,
-repairSuccessProbability, partsCostLow, partsCostHigh, laborHours, redFlags,
-reject, rejectReason, explanation. Do not use Markdown.
+itemName, comparisonSearchQuery, likelyIssue, faultType, repairDifficulty,
+repairRisk, repairSuccessProbability, partsCostLow, partsCostHigh, laborHours,
+redFlags, reject, rejectReason, explanation. Do not use Markdown.
           `.trim(),
         },
         {
@@ -3083,6 +3231,7 @@ function getFlipAnalysis(listing) {
     comparisonSearchQuery: String(listing.title || "")
       .trim().split(/\s+/).slice(0, 10).join(" "),
     likelyIssue: "None: listed as working (resale flip)",
+    faultType: "none",
     repairDifficulty: 1,
     repairRisk: 2,
     repairSuccessProbability: 90,
@@ -3206,6 +3355,9 @@ function normalizeRepairAnalysis(value) {
       .slice(0, 10)
       .join(" "),
     likelyIssue: String(analysis.likelyIssue || "Unknown fault"),
+    faultType: Object.hasOwn(REPAIR_PARTS, String(analysis.faultType || "").trim().toLowerCase())
+      ? String(analysis.faultType).trim().toLowerCase()
+      : "other",
     repairDifficulty: Math.round(
       clamp(parseRepairScore(analysis.repairDifficulty), 1, 10)
     ),
@@ -3324,6 +3476,7 @@ function applyDeterministicRepairRules(
     !seriousDamage && (!untested || demonstratedPower)
   ) {
     analysis.likelyIssue = "Missing SSD; system reaches BIOS";
+    analysis.faultType = "missing_storage";
     analysis.repairDifficulty = Math.min(
       Number(analysis.repairDifficulty) || 3,
       3

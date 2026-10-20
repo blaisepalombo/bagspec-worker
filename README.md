@@ -18,7 +18,18 @@ Two deal types are scanned:
   to each category's `flipMaxPrice`). Listings that mention any fault or
   uncertainty are rejected, the AI repair screening is skipped, and profit
   comes straight from working comparables. Flips are tagged on the
-  dashboard and in Discord alerts. It rejects obvious accessories, obsolete laptops,
+  dashboard and in Discord alerts.
+
+A BUY needs evidence, not just an estimate:
+
+- **Sold-price reference**: the model must match `MODEL_RESALE`, a table of
+  recent typical sold prices. Other models are valued from active asking
+  prices discounted by `UNREFERENCED_SOLD_RATE` and can reach WATCH only.
+- **Parts-price reference**: the AI names a `faultType`, the listing itself
+  must state that fault, and `REPAIR_PARTS` supplies the parts cost. Unknown
+  or unstated faults can reach WATCH only.
+- Laptops released before 2017, low-end processors, listings without a
+  processor, and items relisted at an unchanged price are rejected. It rejects obvious accessories, obsolete laptops,
 locked devices, liquid damage, bulk lots, and incomplete products before
 spending calls on enrichment or AI analysis.
 
