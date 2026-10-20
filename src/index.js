@@ -3610,6 +3610,23 @@ async function findWorkingComparables(
     buildComparableSearchQuery(originalWords, category),
   ];
 
+  const minimumComparablePrices = {
+    laptops: 35,
+    "business laptops": 80,
+    "mini pcs": 70,
+    "game consoles": 60,
+    projectors: 20,
+    "premium audio": 55,
+    "label printers": 65,
+    speakers: 15,
+    "graphics cards": 20,
+  };
+
+  const minimumComparablePrice =
+    categoryProfile?.minimumComparablePrice ||
+    minimumComparablePrices[String(category).toLowerCase()] ||
+    15;
+
   const itemSummaries = [];
   const seenItemIds = new Set();
 
@@ -3631,7 +3648,9 @@ async function findWorkingComparables(
 
     searchUrl.searchParams.set(
       "filter",
-      "conditions:{USED},itemLocationCountry:US"
+      // Sorting by price would otherwise fill the results with accessories
+      // and parts priced below any complete working unit.
+      `conditions:{USED},itemLocationCountry:US,price:[${minimumComparablePrice}..],priceCurrency:USD`
     );
 
     const response = await fetch(searchUrl, {
@@ -3658,23 +3677,6 @@ async function findWorkingComparables(
       }
     }
   }
-
-  const minimumComparablePrices = {
-    laptops: 35,
-    "business laptops": 80,
-    "mini pcs": 70,
-    "game consoles": 60,
-    projectors: 20,
-    "premium audio": 55,
-    "label printers": 65,
-    speakers: 15,
-    "graphics cards": 20,
-  };
-
-  const minimumComparablePrice =
-    categoryProfile?.minimumComparablePrice ||
-    minimumComparablePrices[String(category).toLowerCase()] ||
-    15;
 
   const normalize = (value) =>
     String(value || "")
