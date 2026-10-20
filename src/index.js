@@ -427,6 +427,7 @@ const SEARCH_TERMS = {
 const LOCAL_PREFERENCE_DOLLARS = 10;
 // Working-item flips must be described as working; any stated fault or
 // uncertainty belongs in the repair pipeline instead.
+const FLIP_LISTINGS_PER_SEARCH = 15;
 const FLIP_FAULT_PATTERN =
   /\b(?:for parts|parts only|not working|broken|cracked|damaged|untested|not tested|unable to test|as[- ]is|read description|no power|won't|doesn't work|does not work|faulty|defective|locked|(?<!no )(?:issues?|problems?))\b/;
 const FRESH_LISTING_HOURS = 12;
@@ -965,7 +966,9 @@ function classifyTitle(
     return {
       status: "candidate",
       analysisStatus: "awaiting_details",
-      score: totalBuyCost <= 100 ? 45 : 35,
+      // Below repair candidates, so flips never crowd repairs out of the
+      // enrichment and analysis queues.
+      score: 25,
       recommendation: "REVIEW",
       reasoning: "Working item to resell without repair",
     };
@@ -1224,6 +1227,14 @@ async function scanListings(env) {
         if (!isRecent) olderOrUndatedIgnored += 1;
         return isRecent;
       });
+      // Popular flip searches return hundreds of fresh working listings.
+      // Only the cheapest few can be underpriced, and storing the rest would
+      // flood the enrichment queue and D1's daily write allowance.
+      if (dealType === "flip") {
+        recentItems.sort((a, b) =>
+          Number(a.price?.value || 0) - Number(b.price?.value || 0));
+        recentItems.splice(FLIP_LISTINGS_PER_SEARCH);
+      }
 
       let newForSearch = 0;
       if (recentItems.length > 0) {
