@@ -825,6 +825,12 @@ export function getAuctionMaxBid({
   return Math.max(0, Math.floor(maxAllIn / (1 + SALES_TAX_RATE) - inboundShipping));
 }
 
+// Current price of a search result: the current bid for auctions.
+export function getListedPrice(item) {
+  const value = Number(item?.currentBidPrice?.value ?? item?.price?.value ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function getCategoryProfile(category) {
   return CATEGORY_PROFILES[category] || null;
 }
@@ -1569,7 +1575,8 @@ async function scanListings(env) {
       let newForSearch = 0;
       if (recentItems.length > 0) {
         const statements = recentItems.map((item) => {
-          const price = Number(item.price?.value || 0);
+          // Auctions report their price as the current bid, not as price.
+          const price = getListedPrice(item);
 
           // Initial estimate only; enrichment must confirm the shipping quote.
           const shippingQuote = quotedShipping(item.shippingOptions);

@@ -99,3 +99,11 @@ test("the digest lists near-deals, or says it is still scanning", () => {
 
   assert.match(buildWatchDigestPayload([], "2026-11-10").content, /Still scanning/);
 });
+
+test("auction prices come from the current bid", async () => {
+  const { getListedPrice } = await import("../src/index.js");
+  assert.equal(getListedPrice({ currentBidPrice: { value: "12.50" } }), 12.5);
+  assert.equal(getListedPrice({ price: { value: "30.00" } }), 30);
+  assert.equal(getListedPrice({ currentBidPrice: { value: "9.99" }, price: { value: "0.00" } }), 9.99);
+  assert.equal(getListedPrice({}), 0);
+});
