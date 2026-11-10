@@ -470,6 +470,10 @@ function flipFaultFound(text, pattern = FLIP_FAULT_PATTERN) {
   return pattern.test(cleaned);
 }
 const FRESH_LISTING_HOURS = 12;
+// Auctions: look at broken-item auctions ending 10 minutes to 3 hours from now.
+const AUCTION_WINDOW_HOURS = 3;
+const AUCTION_MIN_MINUTES_LEFT = 10;
+const AUCTION_LISTINGS_PER_SEARCH = 20;
 // Daily cap on Claude BUY checks (about 1-3 cents each with claude-sonnet-5-5).
 // Override with the CLAUDE_DAILY_CALL_LIMIT variable.
 const DAILY_VERIFICATION_LIMIT = 10;
@@ -683,7 +687,25 @@ function savedShippingQuote(details) {
   return costs.length ? Math.min(...costs) : null;
 }
 
-function getUnverifiedConsoleReason(listing, details = {}) {
+export function isHandheldTitle(title) {
+  return /\b(?:[23]ds|dsi|ds\s?lite|nintendo\s+ds|switch\s+lite|game\s?boy|psp|ps\s?vita)\b/i
+    .test(String(title || ""));
+}
+
+// The simple, no-solder handheld faults named in the listing, if any.
+export function getStatedHandheldFault(text) {
+  const value = String(text || "").toLowerCase();
+  const faults = {
+    hinge: REPAIR_EVIDENCE.hinge,
+    screen: REPAIR_EVIDENCE.screen,
+    battery: REPAIR_EVIDENCE.battery,
+    joycon_drift: REPAIR_EVIDENCE.joycon_drift,
+    shell: statedFault("shell|housing|case|buttons?|shoulder|trigger"),
+  };
+  return Object.keys(faults).find((key) => faults[key].test(value)) || null;
+}
+
+export function getUnverifiedConsoleReason(listing, details = {}) {
   if (listing.category !== "Game Consoles") return null;
   const text = getSellerEvidence(listing, details);
   const forParts = /\b(?:for parts|parts or repair|not working|read description|as[- ]is)\b/.test(text) ||
@@ -692,17 +714,25 @@ function getUnverifiedConsoleReason(listing, details = {}) {
   if (/\b(?:ylod|r\s?lod|yellow light of death|red light of death|overheats?|shuts? off|turns? off|freezes?)\b/.test(text))
     return "Seller reports a console fault beyond a missing drive";
   const negative = /\b(?:not tested|untested|unable to test)\b/.test(text) || /\b(?:does not|doesn't|will not|won't|cannot|can't|fails to|no)\s+(?:fully\s+)?(?:boot|power|turn on|start|work)\b/.test(text);
+  // Broken Nintendo handhelds are usually listed "for parts" for a cracked
+  // hinge, shell, screen, battery or stick, without saying they boot. That
+  // rule rejected ~390 consoles a week, so a handheld with a stated, simple
+  // fault passes as long as the seller doesn't say it won't power on.
+  if (isHandheldTitle(listing.title) && !negative && getStatedHandheldFault(text)) return null;
   const boots = /\b(?:boots? (?:to|into) (?:the )?(?:menu|dashboard|xmb|recovery|system software)|powers? on (?:to|and) |turns? on (?:to|and) |tested (?:and )?working|plays? (?:ps[123] )?games?|displays? (?:the )?(?:menu|dashboard|install screen))\b/.test(text);
   if (!boots || negative)
     return "For-parts console has no clear seller proof of booting; missing storage may not be the only fault";
   return null;
 }
 
-function getSellerRejectReason(listing, details = {}) {
+export function getSellerRejectReason(listing, details = {}) {
   const text = getSellerEvidence(listing, details);
   if (/\b(?:liquid damage|water damage|corrosion|burnt board|burned board|icloud locked|activation locked|mdm locked|bios password|computrace)\b/.test(text))
     return "Seller reports liquid/board damage or a device lock";
-  if (/\b(?:(?:damaged|broken|cracked|shattered|nonworking)\s+(?:lcd|screen|display|panel)|(?:lcd|screen|display|panel)\s+(?:is\s+)?(?:damaged|broken|cracked|shattered|nonworking))\b/.test(text))
+  // Handheld screens are clip-in ribbon swaps, so only other devices are
+  // rejected for display damage.
+  if (!isHandheldTitle(listing.title) &&
+      /\b(?:(?:damaged|broken|cracked|shattered|nonworking)\s+(?:lcd|screen|display|panel)|(?:lcd|screen|display|panel)\s+(?:is\s+)?(?:damaged|broken|cracked|shattered|nonworking))\b/.test(text))
     return "Seller reports display damage; simple-parts repair estimate is unreliable";
   if (/\b(?:does not|doesn't|will not|won't|cannot|can't|unable to|fails to)\s+(?:boot|power on|turn on)|\bno power\b|\bdead motherboard\b/.test(text))
     return "Seller reports no boot/power; the fault is unverified";
@@ -755,8 +785,41 @@ function overBudgetClassification(cost, budget) {
     analysisStatus: "filtered",
     score: 0,
     recommendation: "PASS",
-    reasoning: `Over budget: about ${Number(cost).toFixed(2)} all-in, limit is ${budget}`,
+    reasoning: `Over budget: about $${Number(cost).toFixed(2)} all-in, limit is $${budget}`,
   };
+}
+
+// eBay filter dates use whole seconds: 2026-11-10T20:00:00Z.
+export function toEbayDate(ms) {
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+// SQLite-style UTC timestamp; falls back to now for a missing date.
+function toSqlDate(value) {
+  const parsed = Date.parse(value || "");
+  return new Date(Number.isFinite(parsed) ? parsed : Date.now())
+    .toISOString().replace("T", " ").slice(0, 19);
+}
+
+export function isAuctionInWindow(endDate, now = Date.now()) {
+  const endsAt = Date.parse(endDate || "");
+  return Number.isFinite(endsAt) &&
+    endsAt >= now + AUCTION_MIN_MINUTES_LEFT * 60000 &&
+    endsAt <= now + AUCTION_WINDOW_HOURS * 3600000;
+}
+
+// Highest bid (before shipping and tax) that still earns buyProfit at a
+// buyRoi% return and keeps the all-in cost within budget.
+export function getAuctionMaxBid({
+  netForBuyAndProfit, otherInvestment, buyProfit, buyRoi, inboundShipping, budget,
+}) {
+  const roi = buyRoi / 100;
+  const maxAllIn = Math.min(
+    netForBuyAndProfit - buyProfit,
+    (netForBuyAndProfit - roi * otherInvestment) / (1 + roi),
+    budget
+  );
+  return Math.max(0, Math.floor(maxAllIn / (1 + SALES_TAX_RATE) - inboundShipping));
 }
 
 function getCategoryProfile(category) {
@@ -1404,6 +1467,14 @@ async function scanListings(env) {
         query: getSearchTerm(search, Math.floor(scanSlot / searches.length)),
         dealType: "flip",
       });
+      // One broken-item auction search per cycle for auctions ending soon,
+      // where cheap deals happen. Offset so it rotates apart from flips.
+      const auctionSearch = searches[(scanSlot + 3) % searches.length];
+      searchTasks.push({
+        search: auctionSearch,
+        query: getSearchTerm(auctionSearch, Math.floor(scanSlot / searches.length) + 1),
+        dealType: "auction",
+      });
     }
     for (const { search, query, dealType } of searchTasks) {
       const ebayUrl = new URL(
@@ -1412,7 +1483,7 @@ async function scanListings(env) {
 
       ebayUrl.searchParams.set("q", query);
       ebayUrl.searchParams.set("limit", "200");
-      ebayUrl.searchParams.set("sort", "newlyListed");
+      ebayUrl.searchParams.set("sort", dealType === "auction" ? "endingSoonest" : "newlyListed");
 
       if (search.category_id) {
         ebayUrl.searchParams.set(
@@ -1441,7 +1512,9 @@ async function scanListings(env) {
         "filter",
         dealType === "flip"
           ? `conditionIds:{3000},buyingOptions:{FIXED_PRICE},itemLocationCountry:US,price:[${flipMinPrice}..${flipMaxPrice}],priceCurrency:USD`
-          : `conditionIds:{7000},itemLocationCountry:US,price:[..${repairMaxPrice}],priceCurrency:USD`
+          : dealType === "auction"
+            ? `conditionIds:{7000},buyingOptions:{AUCTION},itemLocationCountry:US,price:[..${repairMaxPrice}],priceCurrency:USD,itemEndDate:[${toEbayDate(Date.now() + AUCTION_MIN_MINUTES_LEFT * 60000)}..${toEbayDate(Date.now() + AUCTION_WINDOW_HOURS * 3600000)}]`
+            : `conditionIds:{7000},itemLocationCountry:US,price:[..${repairMaxPrice}],priceCurrency:USD`
       );
 
       const response = await fetch(ebayUrl, {
@@ -1453,9 +1526,13 @@ async function scanListings(env) {
       });
 
       if (!response.ok) {
-        throw new Error(
-          `eBay search error ${response.status}: ${await response.text()}`
-        );
+        const message = `eBay search error ${response.status}: ${await response.text()}`;
+        // The auction search is extra; its failure must not stop the scan.
+        if (dealType === "auction") {
+          console.error("Auction search failed", message.slice(0, 500));
+          continue;
+        }
+        throw new Error(message);
       }
 
       const data = await response.json();
@@ -1465,7 +1542,9 @@ async function scanListings(env) {
       const searchResultCount = Number(data.total) || 0;
       const searchSaturated = items.length >= 200;
 
-      const recentItems = items.filter((item) => {
+      const recentItems = dealType === "auction"
+        ? items.filter((item) => isAuctionInWindow(item.itemEndDate)).slice(0, AUCTION_LISTINGS_PER_SEARCH)
+        : items.filter((item) => {
         const postedAt = Date.parse(item.itemCreationDate || "");
         const isRecent = Number.isFinite(postedAt) &&
           postedAt <= Date.now() && postedAt >= Date.now() - FRESH_LISTING_HOURS * 60 * 60 * 1000;
@@ -1544,7 +1623,7 @@ async function scanListings(env) {
             estimatedTax,
             totalBuyCost,
             item.itemEndDate || null,
-            new Date(item.itemCreationDate).toISOString().replace("T", " ").slice(0, 19),
+            toSqlDate(item.itemCreationDate),
             classification.status,
             classification.analysisStatus,
             classification.score,
@@ -1572,7 +1651,7 @@ async function scanListings(env) {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
         runId, search.profile_key || search.category || search.name,
-        dealType === "flip" ? `flip: ${query}` : query,
+        dealType === "repair" ? query : `${dealType}: ${query}`,
         items.length, searchResultCount, recentItems.length,
         newForSearch, searchSaturated ? 1 : 0
       ).run();
@@ -1719,6 +1798,7 @@ async function runAutomatedCycle(env) {
     ["enrichment", () => enrichCandidates(env, 6)],
     ["analysis", () => analyzeCandidateBatch(env, 4)],
     ["alerts", () => sendPendingDealAlerts(env, 5)],
+    ["digest", () => sendDailyWatchDigest(env)],
   ];
 
   for (const [stage, execute] of stages) {
@@ -2313,11 +2393,17 @@ function buildDiscordDealPayload(listing) {
         value: `$${Number(listing.total_buy_cost || 0).toFixed(2)}`,
         inline: true,
       },
-      {
-        name: "Suggested offer",
-        value: `$${Number(listing.suggested_offer || 0).toFixed(2)}`,
-        inline: true,
-      },
+      listing.deal_type === "auction"
+        ? {
+            name: "Bid up to",
+            value: `$${Number(listing.suggested_offer || 0).toFixed(2)} (current $${Number(listing.price || 0).toFixed(2)})`,
+            inline: true,
+          }
+        : {
+            name: "Suggested offer",
+            value: `$${Number(listing.suggested_offer || 0).toFixed(2)}`,
+            inline: true,
+          },
       {
         name: "Projected profit",
         value: `$${Number(listing.estimated_profit || 0).toFixed(2)}`,
@@ -2365,6 +2451,16 @@ function buildDiscordDealPayload(listing) {
     },
   };
 
+  const endsAt = Date.parse(listing.item_end_date || "");
+  if (listing.deal_type === "auction" && Number.isFinite(endsAt)) {
+    // Discord shows this as "in 42 minutes" in the reader's own time zone.
+    embed.fields.unshift({
+      name: "Auction ends",
+      value: `<t:${Math.floor(endsAt / 1000)}:R>`,
+      inline: true,
+    });
+  }
+
   if (redFlags.length > 0) {
     embed.fields.push({
       name: "Red flags",
@@ -2378,9 +2474,84 @@ function buildDiscordDealPayload(listing) {
   }
 
   return {
-    content: "🔥 **BagSpec found a BUY deal**",
+    content: listing.deal_type === "auction"
+      ? `⏰ **BagSpec auction deal**: bid up to $${Number(listing.suggested_offer || 0).toFixed(2)}`
+      : "🔥 **BagSpec found a BUY deal**",
     embeds: [embed],
   };
+}
+
+// Once a day, after 7pm Idaho time, Discord gets the best near-deals of the
+// last 24 hours. BUYs are rare, so this shows what is out there.
+const DIGEST_TIME_ZONE = "America/Boise";
+const DIGEST_LOCAL_HOUR = 19;
+const DIGEST_SIZE = 5;
+
+export function getLocalDigestClock(now = new Date(), timeZone = DIGEST_TIME_ZONE) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", hourCycle: "h23",
+    }).formatToParts(now).map((part) => [part.type, part.value])
+  );
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) };
+}
+
+export function buildWatchDigestPayload(rows, localDate) {
+  if (!rows.length) {
+    return {
+      content: `📋 **BagSpec daily digest (${localDate})**: no near-deals in the last 24 hours. Still scanning.`,
+    };
+  }
+  const lines = rows.map((row, index) => {
+    const kind = row.deal_type === "auction"
+      ? `auction, bid up to $${Number(row.suggested_offer || 0).toFixed(0)}`
+      : row.deal_type === "flip" ? "working flip" : "repair";
+    return `**${index + 1}. [${truncateDiscord(row.title, 90)}](${row.item_url})**\n` +
+      `$${Number(row.total_buy_cost || 0).toFixed(2)} all-in • ` +
+      `est. profit $${Number(row.estimated_profit || 0).toFixed(2)} ` +
+      `(${Number(row.roi_percent || 0).toFixed(0)}%) • ${row.category} • ${kind}` +
+      (row.recommendation === "BUY" ? " • **BUY**" : "");
+  });
+  return {
+    content: `📋 **BagSpec daily digest (${localDate})**: top near-deals from the last 24 hours`,
+    embeds: [{
+      description: truncateDiscord(lines.join("\n\n"), 4000),
+      color: 0xf1c40f,
+      footer: { text: "WATCH means close but not proven. Check sold prices before buying." },
+    }],
+  };
+}
+
+async function sendDailyWatchDigest(env, now = new Date()) {
+  if (!env.DISCORD_WEBHOOK_URL) return { status: "Discord not configured", sent: 0 };
+  const clock = getLocalDigestClock(now);
+  if (clock.hour < DIGEST_LOCAL_HOUR) return { status: "Not digest time yet", sent: 0 };
+
+  await ensureRuntimeTables(env);
+  const eventKey = `watch-digest-${clock.date}`;
+  const existing = await env.DB.prepare(
+    "SELECT event_key FROM system_events WHERE event_key = ?"
+  ).bind(eventKey).first();
+  if (existing) return { status: "Digest already sent today", sent: 0 };
+
+  const { results: rows } = await env.DB.prepare(`
+    SELECT title, item_url, category, deal_type, recommendation, total_buy_cost,
+      estimated_profit, roi_percent, suggested_offer
+    FROM listings
+    WHERE recommendation IN ('WATCH', 'BUY')
+      AND analysis_status = 'complete'
+      AND first_seen_at >= datetime('now', '-24 hours')
+      AND (item_end_date IS NULL OR julianday(item_end_date) > julianday('now'))
+    ORDER BY estimated_profit DESC
+    LIMIT ?
+  `).bind(DIGEST_SIZE).all();
+
+  await postDiscordWebhook(env, buildWatchDigestPayload(rows, clock.date));
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO system_events (event_key) VALUES (?)"
+  ).bind(eventKey).run();
+  return { status: "Digest sent", sent: 1, items: rows.length };
 }
 
 async function sendPendingDealAlerts(env, limit = 3) {
@@ -2400,7 +2571,7 @@ async function sendPendingDealAlerts(env, limit = 3) {
     WHERE
       recommendation = 'BUY'
       AND alerted_at IS NULL
-      AND item_creation_date >= datetime('now', ?)
+      AND (item_creation_date >= datetime('now', ?) OR deal_type = 'auction')
       AND (item_end_date IS NULL OR julianday(item_end_date) > julianday('now'))
     ORDER BY item_creation_date DESC, deal_score DESC
     LIMIT ?
@@ -2474,10 +2645,11 @@ async function enrichCandidates(env, limit = 10) {
     WHERE
       status = 'candidate'
       AND analysis_status = 'awaiting_details'
-      AND item_creation_date >= datetime('now', '-12 hours')
+      AND (item_creation_date >= datetime('now', '-12 hours') OR (deal_type = 'auction' AND julianday(item_end_date) > julianday('now', '+5 minutes')))
       AND price * ? <= ?
     ORDER BY
       deal_score + CASE
+        WHEN deal_type = 'auction' THEN 30
         WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
         WHEN item_creation_date >= datetime('now', '-12 hours') THEN 8
         ELSE 0
@@ -2552,6 +2724,8 @@ async function enrichCandidates(env, limit = 10) {
           fullDescription: String(item.description || "").slice(0, 12000),
           itemSpecifics,
           buyingOptions: item.buyingOptions || [],
+          bidCount: item.bidCount ?? null,
+          itemEndDate: item.itemEndDate || null,
           shippingDetails,
           returnsAccepted:
             item.returnTerms?.returnsAccepted ?? null,
@@ -2567,7 +2741,8 @@ async function enrichCandidates(env, limit = 10) {
           condition: item.condition || "",
           description: JSON.stringify(savedDetails),
           shipping: quotedShipping(item.shippingOptions),
-          price: Number(item.price?.value),
+          // For an auction, the current bid is what it costs right now.
+          price: Number(item.currentBidPrice?.value ?? item.price?.value),
         };
       } catch (error) {
         return {
@@ -2643,7 +2818,7 @@ async function enrichCandidates(env, limit = 10) {
       WHERE
         status = 'candidate'
         AND analysis_status = 'awaiting_details'
-        AND item_creation_date >= datetime('now', '-12 hours')
+        AND (item_creation_date >= datetime('now', '-12 hours') OR (deal_type = 'auction' AND julianday(item_end_date) > julianday('now', '+5 minutes')))
     `).first();
 
     return {
@@ -2700,10 +2875,11 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     WHERE
       status = 'candidate'
       AND analysis_status = 'details_ready'
-      AND item_creation_date >= datetime('now', '-12 hours')
+      AND (item_creation_date >= datetime('now', '-12 hours') OR (deal_type = 'auction' AND julianday(item_end_date) > julianday('now', '+5 minutes')))
       ${exclusionSql}
     ORDER BY
       deal_score + CASE
+        WHEN deal_type = 'auction' THEN 30
         WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
         WHEN item_creation_date >= datetime('now', '-12 hours') THEN 8
         ELSE 0
@@ -2719,10 +2895,11 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
       WHERE
         status = 'candidate'
         AND analysis_status = 'details_ready'
-        AND item_creation_date >= datetime('now', '-12 hours')
+        AND (item_creation_date >= datetime('now', '-12 hours') OR (deal_type = 'auction' AND julianday(item_end_date) > julianday('now', '+5 minutes')))
       ORDER BY
         deal_score + CASE
-          WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
+          WHEN deal_type = 'auction' THEN 30
+        WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
           WHEN item_creation_date >= datetime('now', '-12 hours') THEN 8
           ELSE 0
         END DESC,
@@ -2866,7 +3043,7 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
 
   const listingData = {
     title: listing.title,
-    dealType: isFlip ? "flip" : "repair",
+    dealType: listing.deal_type === "auction" ? "auction" : isFlip ? "flip" : "repair",
     category: listing.category,
     condition: listing.condition,
     price: listing.price,
@@ -3048,7 +3225,26 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     referencePartsCost !== null &&
     comps.count >= CLAUDE_MIN_COMPS_WITHOUT_SOLD_REFERENCE;
 
-  if (meetsBuyMath && (buyBlockedBy.length === 0 || onlyMissingSoldReference)) {
+  // An auction's price is today's bid and will rise. The max bid is the
+  // highest bid that still makes the BUY profit and return within budget.
+  const isAuction = listing.deal_type === "auction";
+  const auctionMaxBid = isAuction
+    ? getAuctionMaxBid({
+        netForBuyAndProfit: recommendedChannel === "eBay"
+          ? ebayResale - ebayFee - outboundShipping - packingCost - partsCost - riskReserve
+          : localResale - partsCost - riskReserve - 5,
+        otherInvestment: partsCost + packingCost +
+          (recommendedChannel === "eBay" ? outboundShipping : 5),
+        buyProfit: thresholds.buyProfit,
+        buyRoi: thresholds.buyRoi,
+        inboundShipping: Number(listing.shipping_cost || 0),
+        budget: getBuyBudget(env),
+      })
+    : null;
+  const auctionHasRoom = !isAuction || auctionMaxBid >= Number(listing.price || 0) + 1;
+
+  if (meetsBuyMath && auctionHasRoom &&
+      (buyBlockedBy.length === 0 || onlyMissingSoldReference)) {
     recommendation = "BUY";
     newStatus = "qualified";
   } else if (
@@ -3086,6 +3282,14 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
         soldPriceReference: modelResale
           ? { price: modelResale.resale, source: modelResale.source || "BagSpec sold-price table" }
           : null,
+        auction: isAuction
+          ? {
+              currentBid: Number(listing.price || 0),
+              maxBid: auctionMaxBid,
+              bidCount: savedDetails.bidCount ?? null,
+              endsAt: listing.item_end_date,
+            }
+          : null,
       }, thresholds.buyProfit);
     }
 
@@ -3112,10 +3316,11 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
         5 -
         targetProfit;
 
+  // All-in = (price + shipping) x 1.06, so price = all-in / 1.06 - shipping.
   const calculatedOffer = roundMoney(
     Math.max(
       0,
-      (availableAllIn - listing.shipping_cost) / 1.06
+      availableAllIn / (1 + SALES_TAX_RATE) - listing.shipping_cost
     )
   );
 
@@ -3123,10 +3328,13 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     Math.max(0, Number(listing.price || 0) * 0.8)
   );
 
+  // For an auction the "offer" is the most to bid.
   const suggestedOffer =
     recommendation === "PASS"
       ? 0
-      : Math.min(calculatedOffer, lowballCap);
+      : isAuction
+        ? auctionMaxBid
+        : Math.min(calculatedOffer, lowballCap);
 
   const profitScore = clamp(
     (Math.max(estimatedProfit, 0) / 100) * 35,
@@ -3173,7 +3381,9 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
         : finalExplanation + claudeNote;
 
   const financialBreakdown = {
-    dealType: isFlip ? "flip" : "repair",
+    dealType: listing.deal_type === "auction" ? "auction" : isFlip ? "flip" : "repair",
+    auctionMaxBid,
+    auctionEndsAt: isAuction ? listing.item_end_date : null,
     faultType: analysis.faultType,
     referencePartsCost,
     partsReferenceChecked: REPAIR_PARTS_CHECKED,
