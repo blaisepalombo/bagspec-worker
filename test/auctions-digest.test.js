@@ -44,13 +44,14 @@ test("handheld helpers", () => {
   assert.equal(getStatedHandheldFault("comes with charger"), null);
 });
 
-test("auctions are picked up only when ending 10 minutes to 3 hours from now", () => {
+test("auctions are picked up only when ending 10 minutes to 12 hours from now", () => {
   const now = Date.UTC(2026, 10, 10, 18, 0, 0);
   const at = (minutes) => new Date(now + minutes * 60000).toISOString();
   assert.equal(isAuctionInWindow(at(5), now), false, "too late to bid");
   assert.equal(isAuctionInWindow(at(45), now), true);
   assert.equal(isAuctionInWindow(at(170), now), true);
-  assert.equal(isAuctionInWindow(at(240), now), false, "too far away");
+  assert.equal(isAuctionInWindow(at(600), now), true);
+  assert.equal(isAuctionInWindow(at(800), now), false, "too far away");
   assert.equal(isAuctionInWindow(null, now), false);
   assert.equal(toEbayDate(now + 123), "2026-11-10T18:00:00Z");
 });

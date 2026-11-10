@@ -27,8 +27,8 @@ real shipping is passed. With a budget this small, a BUY needs $25+ profit
 and a 50%+ return (WATCH: $15 and 35%). Searches favor broken cameras and
 Nintendo handhelds, which fit the budget best.
 
-**Auctions**: one search per cycle looks for broken-item auctions ending
-10 minutes to 3 hours from now. They go to the front of the queue, and a
+**Auctions**: one search per cycle looks at a whole eBay category for
+broken-item auctions ending 10 minutes to 12 hours from now. They go to the front of the queue, and a
 BUY alert gives the most to bid (`auctionMaxBid`) that still makes the BUY
 profit and return within budget.
 
