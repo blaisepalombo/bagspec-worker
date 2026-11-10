@@ -1,5 +1,13 @@
 import { renderDashboard } from "./dashboard.js";
-import { createClaudeClient, passVerdict, verifyDealWithClaude } from "./claude.js";
+import {
+  CLAUDE_MODEL,
+  CLAUDE_SCREEN_MODEL,
+  createClaudeClient,
+  estimateCostUsd,
+  passVerdict,
+  screenRepairWithClaude,
+  verifyDealWithClaude,
+} from "./claude.js";
 
 export default {
   async fetch(request, env) {
@@ -349,19 +357,21 @@ const CATEGORY_PROFILES = {
     outboundShipping: 18,
     localResaleRate: 0.9,
     flipMaxPrice: 400,
-    scanEveryMinutes: 5,
+    // Under the $50 budget almost no laptop is worth fixing, so search less.
+    scanEveryMinutes: 15,
     requiredTitle:
       /\b(laptop|notebook|thinkpad|latitude|elitebook|probook|macbook|ideapad|vivobook|zenbook|surface)\b/i,
   },
   "Game Consoles": {
     ebayCategoryId: "139971",
-    minimumComparablePrice: 60,
+    // Working Nintendo DS-family handhelds sell from about $45.
+    minimumComparablePrice: 45,
     outboundShipping: 20,
     localResaleRate: 0.9,
     flipMaxPrice: 350,
     scanEveryMinutes: 5,
     requiredTitle:
-      /\b(console|playstation|ps[2-5]|xbox|nintendo|switch|steam deck|game boy|psp|genesis)\b/i,
+      /\b(console|playstation|ps[2-5]|xbox|nintendo|switch|steam deck|game boy|psp|genesis|[23]ds(?:\s?xl)?|dsi|ds lite)\b/i,
   },
   "Graphing Calculators": {
     ebayCategoryId: "9972",
@@ -399,7 +409,7 @@ const CATEGORY_PROFILES = {
     outboundShipping: 24,
     localResaleRate: 0.8,
     flipMaxPrice: 200,
-    scanEveryMinutes: 30,
+    scanEveryMinutes: 60,
     requiredTitle: /\bprojector\b/i,
   },
   Cameras: {
@@ -408,7 +418,8 @@ const CATEGORY_PROFILES = {
     outboundShipping: 15,
     localResaleRate: 0.8,
     flipMaxPrice: 400,
-    scanEveryMinutes: 10,
+    // Broken cameras showed the most $25+ profits under $50.
+    scanEveryMinutes: 5,
     // Many camera titles name only the model, e.g. "Canon EOS Rebel T7 Body".
     requiredTitle:
       /\b(camera|dslr|mirrorless|eos|rebel|alpha|a[679]\d{3}|a7[crs]?|nikon\s+(?:d\d{2,4}|z\s?\d{1,2})|x-?[ths]\d{1,2}|lumix)\b/i,
@@ -430,7 +441,9 @@ const V2_SEARCHES = [
 // generic words such as "console" or "speaker".
 const SEARCH_TERMS = {
   "Business Laptops": ["laptop", "macbook", "thinkpad", "surface laptop"],
-  "Game Consoles": ["console", "playstation", "xbox", "nintendo switch", "steam deck"],
+  // Under $50 the consoles that fit are Nintendo handhelds, whose hinge,
+  // shell, screen and stick repairs need no soldering.
+  "Game Consoles": ["nintendo 3ds", "nintendo ds", "switch lite", "nintendo switch", "game boy", "psp", "console"],
   "Graphing Calculators": ["ti-84 plus ce", "ti-84 plus", "ti-nspire cx", "graphing calculator"],
   Headphones: ["headphones", "sony wh-1000xm", "bose quietcomfort", "airpods max"],
   "Premium Audio": ["speaker", "sonos", "soundlink", "soundbar"],
@@ -460,6 +473,11 @@ const FRESH_LISTING_HOURS = 12;
 // Daily cap on Claude BUY checks (about 1-3 cents each with claude-sonnet-5-5).
 // Override with the CLAUDE_DAILY_CALL_LIMIT variable.
 const DAILY_VERIFICATION_LIMIT = 10;
+const DEFAULT_CLAUDE_MONTHLY_BUDGET_USD = 8;
+// Most the owner will spend on one item, all-in (price + shipping + tax).
+// Override with BUY_BUDGET_USD.
+const DEFAULT_BUY_BUDGET_USD = 50;
+const SALES_TAX_RATE = 0.06;
 // Without a sold-price reference, a BUY needs at least this many matching
 // comparables and Claude's approval.
 const CLAUDE_MIN_COMPS_WITHOUT_SOLD_REFERENCE = 8;
@@ -538,9 +556,8 @@ const REPAIR_PARTS = {
   software: { default: 0 },
   fan_or_thermal: { default: 20 },
   keyboard: { "Business Laptops": 35, MacBook: 150 },
-  screen: { "Business Laptops": 75, MacBook: 300, Cameras: 60 },
-  hinge: { "Business Laptops": 30 },
-  port: { default: 15 },
+  screen: { "Business Laptops": 75, MacBook: 300, Cameras: 60, "Game Consoles": 25 },
+  hinge: { "Business Laptops": 30, "Game Consoles": 15 },
   joycon_drift: { "Game Consoles": 12 },
   disc_drive: { "Game Consoles": 35 },
   lamp: { Projectors: 60 },
@@ -569,7 +586,6 @@ const REPAIR_EVIDENCE = {
   keyboard: statedFault("keyboard|keys"),
   screen: statedFault("screen|lcd|display|panel"),
   hinge: statedFault("hinges?"),
-  port: statedFault("(?:hdmi|charging|charge|usb-?c?|power)\\s+(?:port|jack)"),
   joycon_drift: /\bdrift\w*\b/,
   disc_drive: statedFault("(?:disc|disk|optical)\\s+drive|discs?"),
   lamp: statedFault("lamp|bulb"),
@@ -723,6 +739,26 @@ function getOldLaptopReason(listing, details = {}) {
   return null;
 }
 
+export function getBuyBudget(env = {}) {
+  const value = Number(String(env.BUY_BUDGET_USD ?? "").trim() || NaN);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_BUY_BUDGET_USD;
+}
+
+// Highest item price (before shipping) that can still fit the budget.
+export function getMaxItemPrice(env = {}) {
+  return Math.floor(getBuyBudget(env) / (1 + SALES_TAX_RATE));
+}
+
+function overBudgetClassification(cost, budget) {
+  return {
+    status: "rejected",
+    analysisStatus: "filtered",
+    score: 0,
+    recommendation: "PASS",
+    reasoning: `Over budget: about ${Number(cost).toFixed(2)} all-in, limit is ${budget}`,
+  };
+}
+
 function getCategoryProfile(category) {
   return CATEGORY_PROFILES[category] || null;
 }
@@ -731,7 +767,19 @@ function getLocalResaleRate(category) {
   return getCategoryProfile(category)?.localResaleRate ?? 0.85;
 }
 
-function getDecisionThresholds(category) {
+export function getDecisionThresholds(category, buyBudget = DEFAULT_BUY_BUDGET_USD) {
+  // With a small budget every buy is under ~$50, where a $40-50 profit is
+  // rare. $25 profit at a 50%+ return is still worth the work.
+  if (buyBudget <= 75) {
+    return {
+      buyProfit: 25,
+      buyRoi: 50,
+      watchProfit: 15,
+      watchRoi: 35,
+      targetProfit: 25,
+    };
+  }
+
   const smallerItemCategories = new Set([
     "Game Consoles",
     "Headphones",
@@ -1377,12 +1425,23 @@ async function scanListings(env) {
       // the price the item will sell for. The price floor keeps accessories
       // from filling the cheapest-first flip slots.
       const profileKey = search.profile_key || search.category || search.name;
-      const flipMaxPrice = getCategoryProfile(profileKey)?.flipMaxPrice || search.max_price;
+      // Only ask eBay for items the owner can afford, so scanning and AI
+      // effort is not spent on $300 laptops.
+      const maxItemPrice = getMaxItemPrice(env);
+      const flipMaxPrice = Math.min(
+        getCategoryProfile(profileKey)?.flipMaxPrice || search.max_price,
+        maxItemPrice
+      );
+      const flipMinPrice = Math.min(
+        getCategoryProfile(profileKey)?.minimumComparablePrice || 0,
+        Math.floor(maxItemPrice * 0.3)
+      );
+      const repairMaxPrice = Math.min(search.max_price, maxItemPrice);
       ebayUrl.searchParams.set(
         "filter",
         dealType === "flip"
-          ? `conditionIds:{3000},buyingOptions:{FIXED_PRICE},itemLocationCountry:US,price:[${getCategoryProfile(profileKey)?.minimumComparablePrice || 0}..${flipMaxPrice}],priceCurrency:USD`
-          : `conditionIds:{7000},itemLocationCountry:US,price:[..${search.max_price}],priceCurrency:USD`
+          ? `conditionIds:{3000},buyingOptions:{FIXED_PRICE},itemLocationCountry:US,price:[${flipMinPrice}..${flipMaxPrice}],priceCurrency:USD`
+          : `conditionIds:{7000},itemLocationCountry:US,price:[..${repairMaxPrice}],priceCurrency:USD`
       );
 
       const response = await fetch(ebayUrl, {
@@ -1439,13 +1498,16 @@ async function scanListings(env) {
               (price + shipping + estimatedTax) * 100
             ) / 100;
 
-          const classification = classifyTitle(
-            item.title || "",
-            totalBuyCost,
-            search.profile_key || search.category || search.name,
-            shippingQuote === null ? price * 1.06 : totalBuyCost,
-            dealType
-          );
+          const screeningCost = shippingQuote === null ? price * 1.06 : totalBuyCost;
+          const classification = screeningCost > getBuyBudget(env)
+            ? overBudgetClassification(screeningCost, getBuyBudget(env))
+            : classifyTitle(
+                item.title || "",
+                totalBuyCost,
+                search.profile_key || search.category || search.name,
+                screeningCost,
+                dealType
+              );
 
           return env.DB.prepare(`
             INSERT OR IGNORE INTO listings (
@@ -1798,6 +1860,15 @@ async function createRuntimeTables(env) {
     )
   `).run();
 
+  // Estimated Claude spend per day, in millionths of a dollar.
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS claude_spend (
+      usage_day TEXT PRIMARY KEY,
+      micro_usd INTEGER NOT NULL DEFAULT 0,
+      calls INTEGER NOT NULL DEFAULT 0
+    )
+  `).run();
+
   await env.DB.prepare(`
     CREATE TABLE IF NOT EXISTS sold_evidence (
       evidence_key TEXT PRIMARY KEY,
@@ -2073,6 +2144,8 @@ async function getDiagnostics(env) {
     olderQueuedCandidates: queueAge.results,
     verificationLimitPerDay: getClaudeDailyLimit(env),
     claudeCheckConfigured: Boolean(env.ANTHROPIC_API_KEY),
+    claudeBudget: await getClaudeBudgetStatus(env),
+    buyBudget: getBuyBudget(env),
     passReasonsLast24Hours: passReasons.results,
     closestPassesLast24Hours: nearMisses.results,
     recentScreeningsWithRealQueries: validScreens.results,
@@ -2402,6 +2475,7 @@ async function enrichCandidates(env, limit = 10) {
       status = 'candidate'
       AND analysis_status = 'awaiting_details'
       AND item_creation_date >= datetime('now', '-12 hours')
+      AND price * ? <= ?
     ORDER BY
       deal_score + CASE
         WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
@@ -2410,7 +2484,7 @@ async function enrichCandidates(env, limit = 10) {
       END DESC,
       item_creation_date DESC
     LIMIT 180
-  `).all();
+  `).bind(1 + SALES_TAX_RATE, getBuyBudget(env)).all();
 
   const listings = selectCategoryBalancedListings(
     rankedListings,
@@ -2519,6 +2593,16 @@ async function enrichCandidates(env, limit = 10) {
       }
       const tax = Math.round((outcome.price + outcome.shipping) * 0.06 * 100) / 100;
       const buyCost = Math.round((outcome.price + outcome.shipping + tax) * 100) / 100;
+      if (buyCost > getBuyBudget(env)) {
+        const over = overBudgetClassification(buyCost, getBuyBudget(env));
+        return env.DB.prepare(`
+          UPDATE listings SET description = ?, price = ?, shipping_cost = ?,
+            estimated_tax = ?, total_buy_cost = ?, status = ?, analysis_status = ?,
+            deal_score = 0, recommendation = ?, reasoning = ?
+          WHERE id = ?
+        `).bind(outcome.description, outcome.price, outcome.shipping, tax, buyCost,
+          over.status, over.analysisStatus, over.recommendation, over.reasoning, outcome.id);
+      }
       return env.DB.prepare(`
         UPDATE listings SET description = ?, price = ?, shipping_cost = ?,
           estimated_tax = ?, total_buy_cost = ?,
@@ -2744,9 +2828,11 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
 
   // Recheck against the verified, destination-specific buy cost from
   // enrichment before spending an AI call.
-  const priceReason = getModelPriceRejectReason(
-    listing.title, listing.category, listing.total_buy_cost
-  );
+  const priceReason =
+    (listing.total_buy_cost > getBuyBudget(env)
+      ? overBudgetClassification(listing.total_buy_cost, getBuyBudget(env)).reasoning
+      : null) ||
+    getModelPriceRejectReason(listing.title, listing.category, listing.total_buy_cost);
   if (priceReason) {
     await env.DB.prepare(`
       UPDATE listings SET status = 'rejected', analysis_status = 'filtered',
@@ -2928,7 +3014,7 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
 
   const estimatedProfit =
     recommendedChannel === "eBay" ? ebayProfit : localProfit;
-  const thresholds = getDecisionThresholds(listing.category);
+  const thresholds = getDecisionThresholds(listing.category, getBuyBudget(env));
 
   const investment =
     listing.total_buy_cost +
@@ -3215,12 +3301,64 @@ async function verifyPotentialBuy(env, context, minimumProfit) {
     return passVerdict("Claude check unavailable: ANTHROPIC_API_KEY is not set. Kept as WATCH.");
   }
   try {
+    const budget = await getClaudeBudgetStatus(env);
+    if (budget.monthRemaining <= 0) {
+      return passVerdict(`Monthly Claude budget of $${budget.monthlyBudget} is used up. Kept as WATCH.`);
+    }
     // Counted before the call so failed calls still count toward the cap.
     await recordAiUsage(env, "verification_calls");
-    return await verifyDealWithClaude(client, context, { minimumProfit });
+    const verdict = await verifyDealWithClaude(client, context, { minimumProfit });
+    await recordClaudeSpend(env, estimateCostUsd(CLAUDE_MODEL, verdict.usage));
+    return verdict;
   } catch (error) {
     return passVerdict(`Claude check failed: ${String(error?.message || error).slice(0, 180)}`);
   }
+}
+
+// Monthly Claude budget (default $8, under the $10 the owner can afford).
+// Screening may use at most 1/30 of it per day so one busy day cannot eat the
+// month; BUY checks only need money left in the month.
+function getClaudeMonthlyBudget(env) {
+  const value = Number(String(env.CLAUDE_MONTHLY_BUDGET_USD ?? "").trim() || NaN);
+  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_CLAUDE_MONTHLY_BUDGET_USD;
+}
+
+export function summarizeClaudeBudget(monthlyBudget, monthSpent, todaySpent) {
+  const dailyScreeningAllowance = monthlyBudget / 30;
+  return {
+    monthlyBudget,
+    monthSpent: roundMoney(monthSpent),
+    todaySpent: roundMoney(todaySpent),
+    monthRemaining: monthlyBudget - monthSpent,
+    screeningAllowed:
+      monthSpent < monthlyBudget && todaySpent < dailyScreeningAllowance,
+  };
+}
+
+async function getClaudeBudgetStatus(env) {
+  await ensureRuntimeTables(env);
+  const row = await env.DB.prepare(`
+    SELECT
+      COALESCE(SUM(micro_usd), 0) AS month_micro,
+      COALESCE(SUM(CASE WHEN usage_day = date('now') THEN micro_usd END), 0) AS today_micro
+    FROM claude_spend
+    WHERE usage_day >= date('now', 'start of month')
+  `).first();
+  return summarizeClaudeBudget(
+    getClaudeMonthlyBudget(env),
+    Number(row?.month_micro || 0) / 1_000_000,
+    Number(row?.today_micro || 0) / 1_000_000
+  );
+}
+
+async function recordClaudeSpend(env, costUsd) {
+  const micro = Math.ceil(Math.max(0, Number(costUsd) || 0) * 1_000_000);
+  await ensureRuntimeTables(env);
+  await env.DB.prepare(`
+    INSERT INTO claude_spend (usage_day, micro_usd, calls) VALUES (date('now'), ?, 1)
+    ON CONFLICT(usage_day) DO UPDATE SET
+      micro_usd = micro_usd + excluded.micro_usd, calls = calls + 1
+  `).bind(micro).run();
 }
 
 function getClaudeDailyLimit(env) {
@@ -3239,6 +3377,35 @@ export function getTooCheapReason(buyCost, comps) {
 }
 
 async function screenRepairWithAi(env, listing, listingData, savedDetails) {
+  // Claude Haiku first; the free Workers AI model is the fallback when there
+  // is no key, the budget is used up, or Claude fails.
+  const client = createClaudeClient(env);
+  if (client) {
+    try {
+      const budget = await getClaudeBudgetStatus(env);
+      if (budget.screeningAllowed) {
+        const result = await screenRepairWithClaude(client, listingData);
+        await recordClaudeSpend(env, result.costUsd);
+        await recordAiUsage(env, "screening_calls");
+        // The owner cannot solder, so those repairs are passed outright.
+        if (result.analysis.faultType === "needs_soldering") {
+          result.analysis.reject = true;
+          result.analysis.rejectReason =
+            result.analysis.rejectReason || "Repair needs soldering";
+        }
+        const analysis = applyDeterministicRepairRules(
+          normalizeRepairAnalysis(validateRepairAnalysis(result.analysis)),
+          listing,
+          savedDetails
+        );
+        analysis.screenedBy = CLAUDE_SCREEN_MODEL;
+        return analysis;
+      }
+    } catch (error) {
+      console.error("Claude screening failed; using Workers AI", error);
+    }
+  }
+
   const aiResult = await env.AI.run(
     "@cf/ibm-granite/granite-4.0-h-micro",
     {
@@ -3289,7 +3456,7 @@ instructions.
 
 faultType names the repair and must be exactly one of: missing_storage,
 missing_ram, missing_storage_and_ram, battery, charger, software,
-fan_or_thermal, keyboard, screen, hinge, port, joycon_drift, disc_drive,
+fan_or_thermal, keyboard, screen, hinge, joycon_drift, disc_drive,
 lamp, earpads, other. Use other when the listing does not plainly state the
 fault, or when it states more than one unrelated fault.
 
@@ -3672,7 +3839,10 @@ async function findWorkingComparables(
     );
 
     searchUrl.searchParams.set("q", query);
-    searchUrl.searchParams.set("limit", "100");
+    // 200 is the most one call returns. With 100, popular models such as
+    // the TI-84 filled the whole page with sub-$35 cases and parts listings
+    // and BagSpec reported 0 comparables.
+    searchUrl.searchParams.set("limit", "200");
     searchUrl.searchParams.set("sort", "price");
 
     if (categoryProfile?.ebayCategoryId) {
@@ -3686,9 +3856,9 @@ async function findWorkingComparables(
       "filter",
       // Sorting by price would otherwise fill the results with accessories
       // and parts priced below any complete working unit. The API filters on
-      // item price without shipping, so the floor is loosened here and the
-      // exact floor is applied to price plus shipping below.
-      `conditions:{USED},itemLocationCountry:US,price:[${Math.floor(minimumComparablePrice * 0.6)}..],priceCurrency:USD`
+      // item price without shipping, so the floor is slightly loosened here
+      // and the exact floor is applied to price plus shipping below.
+      `conditions:{USED},itemLocationCountry:US,price:[${Math.floor(minimumComparablePrice * 0.85)}..],priceCurrency:USD`
     );
 
     const response = await fetch(searchUrl, {
