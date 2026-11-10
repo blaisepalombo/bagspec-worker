@@ -32,6 +32,19 @@ A BUY needs evidence, not just an estimate:
 - **Parts-price reference**: the AI names a `faultType`, the listing itself
   must state that fault, and `REPAIR_PARTS` supplies the parts cost. Unknown
   or unstated faults can reach WATCH only.
+- **Claude check**: every would-be BUY goes to Claude (`claude-sonnet-5-5`,
+  see `src/claude.js`). Claude checks that the comparables are the same
+  model, generation and configuration, looks for fake or scam red flags,
+  and re-estimates resale and profit after fees. It must answer "buy" with
+  at least 75% confidence, 3+ matching comparables, no red flags, and a
+  profit above the category minimum. Any API error, refusal, cut-off or
+  invalid answer counts as "pass", so the listing stays at WATCH. A
+  confident mismatch or fake drops it to PASS. A model without a
+  sold-price reference can still reach BUY when it has 8+ comparables and
+  Claude approves. Claude checks are capped at 10 a day (about 1-3 cents
+  each); change the cap with `CLAUDE_DAILY_CALL_LIMIT`.
+- **Too cheap to be real**: a working flip priced under half of the
+  comparables lower quartile is rejected as a likely fake or scam.
 - Laptops released before 2017, low-end processors, listings without a
   processor, and items relisted at an unchanged price are rejected. It rejects obvious accessories, obsolete laptops,
 locked devices, liquid damage, bulk lots, and incomplete products before
@@ -52,12 +65,15 @@ The following secrets stay in Cloudflare and must never be committed:
 - `EBAY_VERIFICATION_TOKEN`
 - `BAGSPEC_ADMIN_KEY`
 - `DISCORD_WEBHOOK_URL`
+- `ANTHROPIC_API_KEY` (Claude BUY check; without it nothing reaches BUY)
+- `CLAUDE_DAILY_CALL_LIMIT` (optional, default 10)
 
 ## Commands
 
 ```bash
 npm install
 npm run check
+npm test
 npm run dev
 npm run deploy
 ```
