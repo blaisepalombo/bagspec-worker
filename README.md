@@ -20,6 +20,20 @@ Two deal types are scanned:
   comes straight from working comparables. Flips are tagged on the
   dashboard and in Discord alerts.
 
+**Budget**: BagSpec only looks at items that cost at most $50 all-in
+(price + shipping + 6% tax; change with `BUY_BUDGET_USD`). eBay searches ask
+only for items priced under that, and anything that ends up over it after
+real shipping is passed. With a budget this small, a BUY needs $25+ profit
+and a 50%+ return (WATCH: $15 and 35%). Searches favor broken cameras and
+Nintendo handhelds, which fit the budget best.
+
+**Claude**: repairs are diagnosed by Claude Haiku (`claude-haiku-5-5`, about
+$0.0005 a listing), falling back to the free Workers AI model if Claude
+fails or the budget is used up. Repairs that need soldering are passed.
+Estimated Claude spend is tracked in the `claude_spend` table and capped by
+`CLAUDE_MONTHLY_BUDGET_USD` (default $8 a month; screening may use at most
+1/30 of it per day). `/diagnostics` shows the current spend.
+
 A BUY needs evidence, not just an estimate:
 
 - **Sold-price reference**: the model must match `MODEL_RESALE`, a table of
