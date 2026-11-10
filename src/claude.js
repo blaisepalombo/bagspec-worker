@@ -63,6 +63,8 @@ You get one listing, the comparable listings BagSpec found, and BagSpec's profit
 4. estimatedProfitAfterFees: estimatedResale minus eBay fees (13.6% of the sale plus $0.40), outbound shipping, $5 packing, the buy cost and the parts cost given. If the local channel is recommended, use the local resale rate given instead of eBay fees and shipping.
 5. confidence (0-100) that buying this listing at its price makes the stated profit.
 
+If the listing is an auction, its price is only the current bid and will rise. Judge profit at the current bid as usual; BagSpec separately tells the owner a maximum bid (auction.maxBid). Mention in reason if many bids or little time left make winning at that maximum unlikely.
+
 Answer "buy" only when the comparables match, there are no authenticity red flags, and estimatedProfitAfterFees is at least the minimum profit given. Otherwise answer "pass". Do not invent facts that are not in the listing. Write reason in one or two plain sentences.`;
 
 export function createClaudeClient(env) {
@@ -165,6 +167,7 @@ function buildUserMessage(context, minimumProfit) {
       estimatedProfit: context.estimatedProfit,
       soldPriceReference: context.soldPriceReference || null,
     },
+    auction: context.auction || null,
     minimumProfit,
   });
 }

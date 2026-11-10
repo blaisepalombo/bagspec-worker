@@ -27,6 +27,18 @@ real shipping is passed. With a budget this small, a BUY needs $25+ profit
 and a 50%+ return (WATCH: $15 and 35%). Searches favor broken cameras and
 Nintendo handhelds, which fit the budget best.
 
+**Auctions**: one search per cycle looks for broken-item auctions ending
+10 minutes to 3 hours from now. They go to the front of the queue, and a
+BUY alert gives the most to bid (`auctionMaxBid`) that still makes the BUY
+profit and return within budget.
+
+**Handhelds**: broken Nintendo handhelds (DS, 3DS, Switch Lite, Game Boy)
+listed "for parts" with a simple stated fault (hinge, screen, battery,
+stick, shell) are analyzed instead of rejected for not proving they boot.
+
+**Daily digest**: after 7pm Idaho time, Discord gets the top 5 WATCH/BUY
+listings from the last 24 hours, once a day.
+
 **Claude**: repairs are diagnosed by Claude Haiku (`claude-haiku-5-5`, about
 $0.0005 a listing), falling back to the free Workers AI model if Claude
 fails or the budget is used up. Repairs that need soldering are passed.
