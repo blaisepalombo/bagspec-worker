@@ -1,4 +1,5 @@
 import { renderDashboard } from "./dashboard.js";
+import { createClaudeClient, passVerdict, verifyDealWithClaude } from "./claude.js";
 
 export default {
   async fetch(request, env) {
@@ -456,7 +457,15 @@ function flipFaultFound(text, pattern = FLIP_FAULT_PATTERN) {
   return pattern.test(cleaned);
 }
 const FRESH_LISTING_HOURS = 12;
+// Daily cap on Claude BUY checks (about 1-3 cents each with claude-sonnet-5-5).
+// Override with the CLAUDE_DAILY_CALL_LIMIT variable.
 const DAILY_VERIFICATION_LIMIT = 10;
+// Without a sold-price reference, a BUY needs at least this many matching
+// comparables and Claude's approval.
+const CLAUDE_MIN_COMPS_WITHOUT_SOLD_REFERENCE = 8;
+// Working flips priced under this share of the comparables' lower quartile
+// are treated as likely fakes or scams.
+const TOO_CHEAP_RATIO = 0.5;
 
 // Typical working, console-only sold prices: the median of the last 90 days
 // of non-bundle eBay sales tracked by PriceCharting, rounded. More specific models come
@@ -845,7 +854,7 @@ async function setupScannerV2(env) {
   };
 }
 
-function getAccessoryRejectReason(title) {
+export function getAccessoryRejectReason(title) {
   const text = String(title || "").toLowerCase();
 
   const accessoryRules = [
@@ -893,6 +902,12 @@ function getAccessoryRejectReason(title) {
         /^\s*(?:memory|ram|hdd|ssd|hard drive|lcd|screen)\b.*\b(?:for|compatible with)\b/,
       reason: "Replacement component rather than a complete device",
     },
+    {
+      // "HP EliteBook 840 G11 Chassis" is an empty shell, not a laptop.
+      pattern:
+        /\b(?:chassis|housing|palm ?rest|logic board|motherboard|mainboard)(?:\s+only)?\s*$/,
+      reason: "Empty chassis or board rather than a complete device",
+    },
   ];
 
   for (const rule of accessoryRules) {
@@ -904,7 +919,7 @@ function getAccessoryRejectReason(title) {
   return null;
 }
 
-function getCategoryRejectReason(title, category) {
+export function getCategoryRejectReason(title, category) {
   const text = String(title || "").toLowerCase();
   const profile = getCategoryProfile(category);
 
@@ -929,6 +944,12 @@ function getCategoryRejectReason(title, category) {
         pattern:
           /\b(controller|gamepad|joy-?con|dock|power supply|ac adapter|hdmi cable|disc|game|memory card)\s+only\b/i,
         reason: "Console accessory rather than a complete console",
+      },
+      {
+        // "Elite Series 2 Controller for Xbox Series X" was priced against
+        // Xbox Series X consoles and showed a fake $170 profit.
+        test: isControllerOnlyTitle,
+        reason: "Controller rather than a complete console",
       },
     ],
     Projectors: [
@@ -985,7 +1006,7 @@ function getCategoryRejectReason(title, category) {
   };
 
   for (const rule of categoryRules[category] || []) {
-    if (rule.pattern.test(text)) {
+    if (rule.test ? rule.test(text) : rule.pattern.test(text)) {
       return rule.reason;
     }
   }
@@ -2050,7 +2071,8 @@ async function getDiagnostics(env) {
     aiUsage: aiUsage.results,
     searchCoverageLast24Hours: searchCoverage.results,
     olderQueuedCandidates: queueAge.results,
-    verificationLimitPerDay: DAILY_VERIFICATION_LIMIT,
+    verificationLimitPerDay: getClaudeDailyLimit(env),
+    claudeCheckConfigured: Boolean(env.ANTHROPIC_API_KEY),
     passReasonsLast24Hours: passReasons.results,
     closestPassesLast24Hours: nearMisses.results,
     recentScreeningsWithRealQueries: validScreens.results,
@@ -2795,6 +2817,18 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     );
   }
 
+  // A working item listed at under half of what genuine ones ask is far
+  // more often fake, stolen, or not as described than a real bargain. The
+  // only BUY BagSpec ever made was "AirPods Max ... one of one" at $64 when
+  // working pairs ask $135+.
+  const tooCheapReason = isFlip
+    ? getTooCheapReason(listing.total_buy_cost, comps)
+    : null;
+  if (tooCheapReason && !analysis.reject) {
+    analysis.reject = true;
+    analysis.rejectReason = tooCheapReason;
+  }
+
   const repairEvidence = getSellerEvidence(listing, savedDetails);
   const referencePartsCost = isFlip
     ? 0
@@ -2911,16 +2945,24 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
   let newStatus = "rejected";
   let verification = null;
 
-  if (
+  const meetsBuyMath =
     !analysis.reject &&
-    buyBlockedBy.length === 0 &&
     !comps.lowConfidence &&
     comps.count >= 3 &&
     estimatedProfit >= thresholds.buyProfit &&
     roiPercent >= thresholds.buyRoi &&
     successProbability >= 70 &&
-    repairRisk <= 6
-  ) {
+    repairRisk <= 6;
+  // Most models have no sold-price reference, which kept almost every good
+  // deal at WATCH. With many matching comparables (already discounted by
+  // UNREFERENCED_SOLD_RATE), Claude's match check may stand in for it.
+  const onlyMissingSoldReference =
+    buyBlockedBy.length === 1 &&
+    !modelResale &&
+    referencePartsCost !== null &&
+    comps.count >= CLAUDE_MIN_COMPS_WITHOUT_SOLD_REFERENCE;
+
+  if (meetsBuyMath && (buyBlockedBy.length === 0 || onlyMissingSoldReference)) {
     recommendation = "BUY";
     newStatus = "qualified";
   } else if (
@@ -2938,42 +2980,32 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
   if (recommendation === "BUY") {
     const verificationCalls = await getVerificationCallsToday(env);
 
-    if (verificationCalls >= DAILY_VERIFICATION_LIMIT) {
-      verification = {
-        approved: false,
-        reason:
-          "Daily large-model verification cap reached. Kept as WATCH for safety.",
-        redFlags: [],
-      };
+    if (verificationCalls >= getClaudeDailyLimit(env)) {
+      verification = passVerdict(
+        "Daily Claude check limit reached. Kept as WATCH for safety."
+      );
     } else {
-      try {
-        verification = await verifyPotentialBuy(env, {
-          listing: listingData,
-          screening: analysis,
-          comparableCount: comps.count,
-          comparableSamples: (comps.comparables || []).slice(0, 5),
-          ebayResale,
-          localResale,
-          purchaseCost: listing.total_buy_cost,
-          partsCost,
-          riskReserve,
-          recommendedChannel,
-          estimatedProfit,
-          roiPercent,
-        });
-      } catch (error) {
-        await handleAnalysisError(env, error);
-        verification = {
-          approved: false,
-          reason: `Final verification unavailable: ${String(error.message || error).slice(0, 180)}`,
-          redFlags: [],
-        };
-      }
+      verification = await verifyPotentialBuy(env, {
+        listing: listingData,
+        comparables: (comps.comparables || []).slice(0, 10),
+        ebayResale,
+        localResale,
+        localResaleRate: getLocalResaleRate(listing.category),
+        outboundShipping,
+        purchaseCost: listing.total_buy_cost,
+        partsCost,
+        riskReserve,
+        recommendedChannel,
+        estimatedProfit,
+        soldPriceReference: modelResale
+          ? { price: modelResale.resale, source: modelResale.source || "BagSpec sold-price table" }
+          : null,
+      }, thresholds.buyProfit);
     }
 
     if (!verification.approved) {
-      recommendation = "WATCH";
-      newStatus = "analyzed";
+      recommendation = verification.clearMismatch ? "PASS" : "WATCH";
+      newStatus = verification.clearMismatch ? "rejected" : "analyzed";
     }
   }
 
@@ -3046,10 +3078,13 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
         ? `${recommendation}: Working resale flip with no planned repair. BagSpec found ${comps.count} valid working comparables and estimated resale at $${ebayResale.toFixed(2)} on eBay or $${localResale.toFixed(2)} locally, producing an estimated ${recommendedChannel} profit of $${estimatedProfit.toFixed(2)} and an ROI of ${roiPercent.toFixed(1)}%.`
       : `${recommendation}: The likely issue is ${analysis.likelyIssue}. Repair difficulty is ${analysis.repairDifficulty}/10, risk is ${repairRisk}/10, and estimated repair success is ${successProbability}%. BagSpec found ${comps.count} valid working comparables and estimated resale at $${ebayResale.toFixed(2)} on eBay or $${localResale.toFixed(2)} locally. Estimated parts cost is $${partsCost.toFixed(2)}, producing an estimated ${recommendedChannel} profit of $${estimatedProfit.toFixed(2)} and an ROI of ${roiPercent.toFixed(1)}%.`;
 
+  const claudeNote = verification ? ` Claude check: ${verification.reason}` : "";
   const explanationWithLimits =
-    recommendation === "WATCH" && buyBlockedBy.length
+    recommendation === "WATCH" && buyBlockedBy.length && !verification
       ? `${finalExplanation} Not eligible for BUY: ${buyBlockedBy.join("; ")}.`
-      : finalExplanation;
+      : analysis.reject && analysis.rejectReason && recommendation === "PASS"
+        ? `${finalExplanation} Rejected: ${analysis.rejectReason}.`
+        : finalExplanation + claudeNote;
 
   const financialBreakdown = {
     dealType: isFlip ? "flip" : "repair",
@@ -3174,63 +3209,33 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
   };
 }
 
-async function verifyPotentialBuy(env, context) {
-  const result = await env.AI.run(
-    "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-    {
-      messages: [
-        {
-          role: "system",
-          content: `
-You are the final safety reviewer for an electronics repair purchase.
-Approve only when the listing evidence supports the diagnosis, the repair is
-realistic for a DIY flipper, the parts estimate is conservative, the working
-comparables match the actual device, and the stated profit has adequate room
-for uncertainty. Reject locks, liquid damage, corrosion, unknown no-power or
-board-level faults, suspicious comparables, and unsupported assumptions.
-For a listing whose dealType is "flip", no repair is planned: approve only
-when the listing describes a complete, working unit with no stated faults
-and the comparables match its exact model and configuration.
-Do not redo arithmetic. Return concise JSON only.
-          `.trim(),
-        },
-        {
-          role: "user",
-          content:
-            "Verify this potential BUY:\n" +
-            JSON.stringify(context).slice(0, 10000),
-        },
-      ],
-      temperature: 0,
-      max_tokens: 300,
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          type: "object",
-          properties: {
-            approved: { type: "boolean" },
-            reason: { type: "string" },
-            redFlags: {
-              type: "array",
-              items: { type: "string" },
-            },
-          },
-          required: ["approved", "reason", "redFlags"],
-        },
-      },
-    }
-  );
+async function verifyPotentialBuy(env, context, minimumProfit) {
+  const client = createClaudeClient(env);
+  if (!client) {
+    return passVerdict("Claude check unavailable: ANTHROPIC_API_KEY is not set. Kept as WATCH.");
+  }
+  try {
+    // Counted before the call so failed calls still count toward the cap.
+    await recordAiUsage(env, "verification_calls");
+    return await verifyDealWithClaude(client, context, { minimumProfit });
+  } catch (error) {
+    return passVerdict(`Claude check failed: ${String(error?.message || error).slice(0, 180)}`);
+  }
+}
 
-  await recordAiUsage(env, "verification_calls");
-  const verification = parseAiResponse(result);
+function getClaudeDailyLimit(env) {
+  const raw = String(env.CLAUDE_DAILY_CALL_LIMIT ?? "").trim();
+  const limit = Number(raw);
+  return raw && Number.isInteger(limit) && limit >= 0 ? limit : DAILY_VERIFICATION_LIMIT;
+}
 
-  return {
-    approved: verification.approved === true,
-    reason: String(verification.reason || "No verification reason supplied"),
-    redFlags: Array.isArray(verification.redFlags)
-      ? verification.redFlags.map(String).slice(0, 8)
-      : [],
-  };
+// A working flip asking under half of the comparables lower quartile.
+export function getTooCheapReason(buyCost, comps) {
+  const prices = comps?.prices || [];
+  if (prices.length < 3) return null;
+  const lowerQuartile = prices[Math.floor((prices.length - 1) * 0.25)];
+  if (!(lowerQuartile > 0) || Number(buyCost) >= lowerQuartile * TOO_CHEAP_RATIO) return null;
+  return `Price $${Number(buyCost).toFixed(2)} is under half of what working ones ask ($${lowerQuartile.toFixed(2)}+); likely fake, scam, or not as described`;
 }
 
 async function screenRepairWithAi(env, listing, listingData, savedDetails) {
@@ -3656,22 +3661,7 @@ async function findWorkingComparables(
     buildComparableSearchQuery(originalWords, category),
   ];
 
-  const minimumComparablePrices = {
-    laptops: 35,
-    "business laptops": 80,
-    "mini pcs": 70,
-    "game consoles": 60,
-    projectors: 20,
-    "premium audio": 55,
-    "label printers": 65,
-    speakers: 15,
-    "graphics cards": 20,
-  };
-
-  const minimumComparablePrice =
-    categoryProfile?.minimumComparablePrice ||
-    minimumComparablePrices[String(category).toLowerCase()] ||
-    15;
+  const minimumComparablePrice = getMinimumComparablePrice(category);
 
   const itemSummaries = [];
   const seenItemIds = new Set();
@@ -3726,6 +3716,27 @@ async function findWorkingComparables(
     }
   }
 
+  return selectComparables(itemSummaries, {
+    originalWords,
+    category,
+    requiredModel,
+    excludedItemId,
+    searchQueries,
+  });
+}
+
+// Pure matching step: decides which eBay results are the same working
+// device as the listing and turns their prices into a resale estimate.
+export function selectComparables(itemSummaries, {
+  originalWords,
+  category = "",
+  requiredModel = null,
+  excludedItemId = null,
+  searchQueries = [],
+}) {
+  const categoryProfile = getCategoryProfile(category);
+  const minimumComparablePrice = getMinimumComparablePrice(category);
+
   const normalize = (value) =>
     String(value || "")
       .toLowerCase()
@@ -3749,6 +3760,7 @@ async function findWorkingComparables(
         /\d/.test(word) &&
         !/^20\d{2}$/.test(word) &&
         !/^\d+(?:gb|tb|inch|in)$/.test(word) &&
+        !isSpecToken(word) &&
         !/^(?:i[3579]|m[1357]|ryzen\d?|xeon)\d*[a-z0-9]*$/.test(word)
     )
     .sort((a, b) => {
@@ -3758,7 +3770,16 @@ async function findWorkingComparables(
       return bMixed - aMixed || b.length - a.length;
     });
 
-  const strongestModelToken = modelTokens[0] || null;
+  // Short model names such as "5D", "G7", or "T7" are the model when no
+  // longer model number exists; without this, "Canon EOS 5D" matched any
+  // two of "canon", "eos", "digital", "camera" and priced every Canon DSLR.
+  const shortModelToken = queryWords.find((word) =>
+    /^(?:[a-z]\d{1,2}[a-z]?|\d[a-z])$/.test(word) &&
+    !/^(?:i[3579]|m[1-4])$/.test(word)
+  ) || null;
+
+  const strongestModelToken = modelTokens[0] || shortModelToken;
+  const queryMark = getMarkVariant(matchingQuery);
   const configurationTokens = queryWords.filter(
     (word) =>
       word !== strongestModelToken &&
@@ -3842,11 +3863,17 @@ async function findWorkingComparables(
         buyingOptions.includes("FIXED_PRICE") ||
         buyingOptions.includes("BEST_OFFER");
 
+      // "Laptop w/ Charger" or "Camera with Case" is a complete device that
+      // lists its extras, not an accessory. Checking the raw title threw out
+      // most ordinary listings and left only odd, high-priced ones as comps.
+      const deviceTitle = stripIncludedExtras(title);
       const hasBadTitle =
         excludedTitlePattern.test(title) ||
         incompletePattern.test(title) ||
-        accessoryPattern.test(title) ||
-        componentForDevicePattern.test(title);
+        accessoryPattern.test(deviceTitle) ||
+        componentForDevicePattern.test(deviceTitle) ||
+        (String(category).toLowerCase() === "game consoles" &&
+          isControllerOnlyTitle(title));
 
       if (
         !isWorkingCondition ||
@@ -3855,6 +3882,12 @@ async function findWorkingComparables(
       ) {
         return false;
       }
+
+      // "Mark I", "Mark II" and "Mark III" are different cameras at very
+      // different prices. A query without a mark is the original model.
+      const titleMark = getMarkVariant(title);
+      if (titleMark !== null && titleMark !== (queryMark ?? 1)) return false;
+      if (queryMark !== null && queryMark > 1 && titleMark !== queryMark) return false;
 
       if (
         requiredCategoryPattern &&
@@ -4004,6 +4037,62 @@ async function findWorkingComparables(
     salesSample: pickSpread(cleanedItems, SOLD_EVIDENCE_LISTINGS_PER_MODEL),
   };
 }
+
+// Spec numbers such as 20.1MP, 18-55mm, 60Hz, 4K or 1080p are shared by
+// many models, so they must never be treated as the model number.
+function isSpecToken(word) {
+  return /^\d+(?:mp|mm|hz|ghz|mhz|w|mah|fps|k|p|nm|x)$/.test(word);
+}
+
+// Returns 1-5 for "Mark I" .. "Mark V" (also "Mk II"), or null.
+export function getMarkVariant(text) {
+  const match = String(text || "").toLowerCase()
+    .match(/\b(?:mark|mk)\.?\s*(iv|v|iii|ii|i|[1-5])\b/);
+  if (!match) return null;
+  const roman = { i: 1, ii: 2, iii: 3, iv: 4, v: 5 };
+  return roman[match[1]] ?? Number(match[1]);
+}
+
+// Drops the "with charger and case" tail and common laptop features so
+// the accessory check only sees what the item is.
+export function stripIncludedExtras(title) {
+  return String(title || "")
+    .replace(/\s(?:with|w\/|includes?|including|incl\.?|comes with|plus|\+)\s.*$/i, "")
+    .replace(/\b(?:backlit|backlight|illuminated)\s+keyboard\b|\bwebcam\b|\btouchpad\b|\btrackpad\b/gi, " ");
+}
+
+// A controller or Joy-Con listing is not a console and must not price one.
+export function isControllerOnlyTitle(title) {
+  const text = String(title || "").toLowerCase();
+  // Words that only a console listing uses, e.g. "Switch V2", "HAC-001".
+  if (/\b(?:console|system|bundle|oled|lite|v[12]|unit|tablet|ha[cd]-?\d+|\d+\s?(?:gb|tb))\b/.test(text)) return false;
+  // "& Violet Edition Joy-Cons" is a name, so only "with", "w/", "+" and
+  // "includes" mean the controller comes with something else.
+  if (/(?:\bwith|\bw\/|\+|\bincludes?)\s+(?:\S+\s+){0,6}(?:controllers?|gamepads?|joy[- ]?cons?)\b/.test(text)) return false;
+  return /\b(?:controllers?|gamepads?|joy[- ]?cons?)\b/.test(text);
+}
+
+function getMinimumComparablePrice(category) {
+  const categoryProfile = getCategoryProfile(category);
+  const minimumComparablePrices = {
+    laptops: 35,
+    "business laptops": 80,
+    "mini pcs": 70,
+    "game consoles": 60,
+    projectors: 20,
+    "premium audio": 55,
+    "label printers": 65,
+    speakers: 15,
+    "graphics cards": 20,
+  };
+
+  const minimumComparablePrice =
+    categoryProfile?.minimumComparablePrice ||
+    minimumComparablePrices[String(category).toLowerCase()] ||
+    15;
+  return minimumComparablePrice;
+}
+
 
 function pickSpread(items, count) {
   if (items.length <= count) return items.slice();
