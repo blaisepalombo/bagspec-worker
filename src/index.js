@@ -470,10 +470,13 @@ function flipFaultFound(text, pattern = FLIP_FAULT_PATTERN) {
   return pattern.test(cleaned);
 }
 const FRESH_LISTING_HOURS = 12;
-// Auctions: look at broken-item auctions ending 10 minutes to 3 hours from now.
-const AUCTION_WINDOW_HOURS = 3;
+// Auctions: broken-item auctions ending 10 minutes to 12 hours from now, the
+// whole eBay category at once. A 3-hour window with one search term found
+// nothing: few broken auctions under $50 end in any given 3 hours, and a
+// max bid can be placed any time before the end.
+const AUCTION_WINDOW_HOURS = 12;
 const AUCTION_MIN_MINUTES_LEFT = 10;
-const AUCTION_LISTINGS_PER_SEARCH = 20;
+const AUCTION_LISTINGS_PER_SEARCH = 40;
 // Daily cap on Claude BUY checks (about 1-3 cents each with claude-sonnet-5-5).
 // Override with the CLAUDE_DAILY_CALL_LIMIT variable.
 const DAILY_VERIFICATION_LIMIT = 10;
@@ -1481,7 +1484,10 @@ async function scanListings(env) {
         "https://api.ebay.com/buy/browse/v1/item_summary/search"
       );
 
-      ebayUrl.searchParams.set("q", query);
+      // Auction searches cover the whole category, so they need no keywords.
+      if (!(dealType === "auction" && search.category_id)) {
+        ebayUrl.searchParams.set("q", query);
+      }
       ebayUrl.searchParams.set("limit", "200");
       ebayUrl.searchParams.set("sort", dealType === "auction" ? "endingSoonest" : "newlyListed");
 
@@ -1651,7 +1657,11 @@ async function scanListings(env) {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
         runId, search.profile_key || search.category || search.name,
-        dealType === "repair" ? query : `${dealType}: ${query}`,
+        dealType === "repair"
+          ? query
+          : dealType === "auction" && search.category_id
+            ? "auction: whole category"
+            : `${dealType}: ${query}`,
         items.length, searchResultCount, recentItems.length,
         newForSearch, searchSaturated ? 1 : 0
       ).run();
