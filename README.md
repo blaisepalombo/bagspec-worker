@@ -36,6 +36,13 @@ profit and return within budget.
 listed "for parts" with a simple stated fault (hinge, screen, battery,
 stick, shell) are analyzed instead of rejected for not proving they boot.
 
+**My flips tracker**: on the dashboard, "I bought this" on a deal (or
+"+ Add an item" for local buys) saves it to the `inventory` table. Each item
+can be updated with parts costs and status, and marked sold (eBay fees are
+estimated if left blank). The tab totals profit, money tied up, and how real
+profits compare with BagSpec's estimates. The data is private: the
+`/api/inventory` routes always need the admin login, and `/login` signs in.
+
 **Daily digest**: after 7pm Idaho time, Discord gets the top 5 WATCH/BUY
 listings from the last 24 hours, once a day.
 

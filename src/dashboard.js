@@ -80,6 +80,26 @@ export function renderDashboard() {
     .run { display:grid; grid-template-columns:160px 1fr 135px; gap:12px; border-top:1px solid var(--line); padding:10px 0; font-size:13px; color:var(--muted); }
     .run strong { color:var(--ink); font-weight:600; overflow-wrap:anywhere; }
     .error { color:var(--red); } .foot { color:var(--muted); font-size:13px; margin-top:30px; max-width:760px; }
+    .btn.small { min-height:38px; padding:6px 12px; font-size:13px; }
+    .btn.primary { background:var(--accent); color:#07120b; border-color:var(--accent); }
+    .tag.auction { color:#9fc7ff; border-color:#3d5f86; } .tag.mine { color:#07120b; background:var(--accent); border-color:var(--accent); }
+    .ends { color:#9fc7ff; font-weight:650; }
+    .flip-tools { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 14px; }
+    .flip-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px 16px; padding:14px 16px; background:var(--surface); border:1px solid var(--line); border-radius:8px; }
+    .flip-row .item strong { display:block; font-size:15px; } .flip-row .item small { color:var(--muted); font-size:13px; }
+    .flip-row .money { text-align:right; font-size:13px; color:var(--muted); white-space:nowrap; }
+    .flip-row .money strong { display:block; font-size:16px; color:var(--ink); }
+    .flip-row .buttons { grid-column:1/-1; display:flex; flex-wrap:wrap; gap:8px; }
+    .gain { color:var(--accent) !important; } .loss { color:var(--red) !important; }
+    dialog { background:var(--surface); color:var(--ink); border:1px solid var(--line); border-radius:10px; padding:0; width:min(440px,calc(100vw - 32px)); }
+    dialog::backdrop { background:rgba(0,0,0,.6); }
+    .dlg-body { padding:20px; display:grid; gap:12px; }
+    .dlg-body h3 { margin:0; font-size:18px; }
+    .dlg-body label { display:grid; gap:4px; font-size:13px; color:var(--muted); }
+    .dlg-body label .input, .dlg-body label .select { width:100%; min-width:0; }
+    .dlg-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:4px; }
+    .hint { font-size:12px; color:var(--muted); margin:0; }
+    @media(max-width:560px) { .flip-row { grid-template-columns:1fr; } .flip-row .money { text-align:left; } }
     [hidden] { display:none !important; }
     @media(max-width:850px) { .metrics { grid-template-columns:repeat(2,1fr); } .deal { grid-template-columns:1fr; } }
     @media(max-width:560px) { .shell { padding:0 16px 55px; } header { min-height:64px; } .status { display:none; } .hero { padding:27px 0 23px; display:block; } .hero-note { margin-top:12px; } .metrics { gap:8px; margin-bottom:30px; } .metric { padding:13px; min-height:100px; } .metric strong { font-size:23px; } .controls { gap:9px; } .input,.select { width:100%; } .tab { flex:1; padding:10px 5px; font-size:13px; } .deal { padding:14px; } .thumb { width:64px; height:64px; } .facts { gap:6px; } .facts strong { font-size:15px; } .actions { flex-wrap:wrap; } .list-row { flex-wrap:wrap; } .list-row .item { flex-basis:calc(100% - 100px); } .list-row .numbers { margin-left:auto; } .run { grid-template-columns:1fr 1fr; } .run span:last-child { text-align:right; } }
@@ -95,16 +115,17 @@ export function renderDashboard() {
     <div class="hero"><div><div class="eyebrow">eBay repair scanner</div><h1>Dashboard</h1><p class="sub">Review new listings and scanner results. Check every listing yourself before buying.</p></div><p class="hero-note" id="updated">Loading data…</p></div>
     <section class="metrics" aria-label="Scanner summary"><div class="metric"><small>Deals shown</small><strong id="m-deals">—</strong><em>Up to 100 BUY and WATCH leads</em></div><div class="metric"><small>Listings shown</small><strong id="m-listings">—</strong><em>Latest 100 listings</em></div><div class="metric"><small>New in latest scan</small><strong id="m-new">—</strong><em id="m-scan-time">Waiting for data</em></div><div class="metric"><small>Scanner status</small><strong id="m-cycle">—</strong><em id="m-cycle-time">Waiting for data</em></div></section>
     <div class="section-top"><h2>Results</h2><span class="caution" id="load-state" role="status" aria-live="polite"></span></div>
-    <div class="controls"><div class="tabs" role="tablist" aria-label="Dashboard sections"><button id="tab-deals" class="tab active" data-tab="deals" type="button" role="tab" aria-controls="deals" aria-selected="true" tabindex="0">Deals</button><button id="tab-listings" class="tab" data-tab="listings" type="button" role="tab" aria-controls="listings" aria-selected="false" tabindex="-1">New listings</button><button id="tab-operations" class="tab" data-tab="operations" type="button" role="tab" aria-controls="operations" aria-selected="false" tabindex="-1">Operations</button></div><label class="visually-hidden" for="search">Search titles and categories</label><input id="search" class="input" type="search" placeholder="Search titles and categories" autocomplete="off"><label class="visually-hidden" for="sort">Sort results</label><select id="sort" class="select"><option value="newest">Newest first</option><option value="score">Highest score</option><option value="profit">Projected profit</option></select></div>
+    <div class="controls"><div class="tabs" role="tablist" aria-label="Dashboard sections"><button id="tab-deals" class="tab active" data-tab="deals" type="button" role="tab" aria-controls="deals" aria-selected="true" tabindex="0">Deals</button><button id="tab-listings" class="tab" data-tab="listings" type="button" role="tab" aria-controls="listings" aria-selected="false" tabindex="-1">New listings</button><button id="tab-flips" class="tab" data-tab="flips" type="button" role="tab" aria-controls="flips" aria-selected="false" tabindex="-1">My flips</button><button id="tab-operations" class="tab" data-tab="operations" type="button" role="tab" aria-controls="operations" aria-selected="false" tabindex="-1">Operations</button></div><label class="visually-hidden" for="search">Search titles and categories</label><input id="search" class="input" type="search" placeholder="Search titles and categories" autocomplete="off"><label class="visually-hidden" for="sort">Sort results</label><select id="sort" class="select"><option value="newest">Newest first</option><option value="score">Highest score</option><option value="profit">Projected profit</option></select></div>
     <div id="chips" class="chips" role="group" aria-label="Filter by category"></div>
-    <section id="deals" class="cards" role="tabpanel" aria-labelledby="tab-deals" tabindex="0"></section><section id="listings" class="list" role="tabpanel" aria-labelledby="tab-listings" tabindex="0" hidden></section><section id="operations" role="tabpanel" aria-labelledby="tab-operations" tabindex="0" hidden><div class="panel"><h3>Recent cycles</h3><div id="runs" class="runs"></div></div><div class="panel"><h3>Queue by category</h3><div id="queue" class="runs"></div></div></section>
-    <p class="foot">A BUY needs a recorded sold price for the model and a known repair cost; other resale estimates are discounted asking prices and stay at WATCH. Check condition, shipping, fees, and parts before buying. The scanner runs on its Cloudflare schedule even when this page is closed.</p>
+    <section id="deals" class="cards" role="tabpanel" aria-labelledby="tab-deals" tabindex="0"></section><section id="listings" class="list" role="tabpanel" aria-labelledby="tab-listings" tabindex="0" hidden></section><section id="flips" role="tabpanel" aria-labelledby="tab-flips" tabindex="0" hidden></section><section id="operations" role="tabpanel" aria-labelledby="tab-operations" tabindex="0" hidden><div class="panel"><h3>Recent cycles</h3><div id="runs" class="runs"></div></div><div class="panel"><h3>Queue by category</h3><div id="queue" class="runs"></div></div></section>
+    <p class="foot">Only items up to $50 all-in are shown. A BUY needs matching comparables, a known no-solder repair, at least $25 profit and a 50% return, and Claude's final check. Resale estimates come from asking prices, so check eBay sold listings before buying. For auctions, "Bid up to" is the most to bid. The scanner runs every 5 minutes even when this page is closed.</p>
   </main>
 </div>
+<dialog id="dlg" aria-labelledby="dlg-title"><form id="dlg-form" class="dlg-body" method="dialog"><h3 id="dlg-title"></h3><div id="dlg-fields" class="dlg-body" style="padding:0"></div><p class="hint error" id="dlg-error" role="alert"></p><div class="dlg-actions"><button class="btn small" type="button" id="dlg-cancel">Cancel</button><button class="btn small primary" type="submit" id="dlg-submit">Save</button></div></form></dialog>
 <script>
 (() => {
   const $ = id => document.getElementById(id);
-  const state = { tab:'deals', category:'All', deals:[], listings:[], diagnostics:null };
+  const state = { tab: location.hash === '#flips' ? 'flips' : 'deals', category:'All', deals:[], listings:[], diagnostics:null, inventory:{ items:[], summary:{} }, inventoryLocked:false };
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const money = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) ? '$' + Number(value).toFixed(2) : '—';
   const date = value => { if (!value) return null; const d = new Date(String(value).includes('T') ? value : String(value).replace(' ', 'T') + 'Z'); return Number.isNaN(d.getTime()) ? null : d; };
@@ -112,6 +133,8 @@ export function renderDashboard() {
   const ebayUrl = value => { try { const u = new URL(value); return u.protocol === 'https:' && /(^|\\.)ebay\\.com$/.test(u.hostname) ? u.href : ''; } catch { return ''; } };
   const imageUrl = value => { try { const u = new URL(value); return u.protocol === 'https:' && /(^|\\.)ebayimg\\.com$/.test(u.hostname) ? u.href : ''; } catch { return ''; } };
   const empty = (title,body) => '<div class="empty"><strong>' + esc(title) + '</strong>' + esc(body) + '</div>';
+  const timeLeft = value => { const d = date(value); if (!d) return ''; const ms = d.getTime() - Date.now(); if (ms <= 0) return 'ended'; const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000); return 'ends in ' + (h ? h + 'h ' : '') + m + 'm'; };
+  const kind = x => x.deal_type === 'auction' ? 'Auction' : x.deal_type === 'flip' ? 'Flip' : 'Repair';
   function filtered(rows) {
     const q = $('search').value.trim().toLowerCase();
     const result = rows.filter(x => (state.category === 'All' || x.category === state.category) && (String(x.title || '').toLowerCase().includes(q) || String(x.category || '').toLowerCase().includes(q)));
@@ -134,7 +157,10 @@ export function renderDashboard() {
       const heading = url ? '<a target="_blank" rel="noopener noreferrer" href="' + esc(url) + '">' + title + '</a>' : title;
       const pic = img ? '<img class="thumb" loading="lazy" alt="" src="' + esc(img) + '">' : '<span class="thumb no-thumb">⌁</span>';
       const label = x.recommendation === 'BUY' ? 'BUY lead' : 'WATCH';
-      return '<article class="deal"><div class="deal-head">' + pic + '<div class="deal-body"><div class="meta"><span class="tag ' + (x.recommendation === 'BUY' ? '' : 'watch') + '">' + label + '</span>' + (x.deal_type === 'flip' ? 'Flip' : 'Repair') + ' · ' + esc(x.category || 'Other') + ' · ' + esc(when(x.first_seen_at)) + '</div><h3>' + heading + '</h3><div class="meta">Score ' + esc(x.deal_score ?? '—') + '/100 · ' + esc(x.recommended_channel || 'Channel unconfirmed') + '</div></div></div><div class="facts"><div><small>Buy cost</small><strong>' + money(x.total_buy_cost) + '</strong></div><div><small>Suggested offer</small><strong>' + money(x.suggested_offer) + '</strong></div><div><small>Projected profit</small><strong class="profit">' + money(x.estimated_profit) + '</strong></div></div><p class="reason">' + (x.deal_type === 'flip' ? 'Working flip, no repair planned' : 'Possible repair: ' + esc(x.likely_issue || 'Unknown') + ' · Parts estimate ' + money(x.estimated_parts_cost)) + ' · Local asking-price estimate ' + money(x.estimated_resale_local) + '</p><div class="actions">' + (url ? '<a class="link" target="_blank" rel="noopener noreferrer" href="' + esc(url) + '">Inspect on eBay ↗</a>' : '<span class="caution">Listing link unavailable</span>') + '<span class="caution">Verify before buying</span></div></article>';
+      const auction = x.deal_type === 'auction';
+      const typeTag = auction ? '<span class="tag auction">Auction</span> <span class="ends">' + esc(timeLeft(x.item_end_date)) + '</span>' : kind(x);
+      const mine = x.inventory_id ? '<span class="tag mine">In My flips</span>' : '<button class="btn small" type="button" data-buy="' + esc(x.id) + '">I bought this</button>';
+      return '<article class="deal"><div class="deal-head">' + pic + '<div class="deal-body"><div class="meta"><span class="tag ' + (x.recommendation === 'BUY' ? '' : 'watch') + '">' + label + '</span>' + typeTag + ' · ' + esc(x.category || 'Other') + ' · ' + esc(when(x.first_seen_at)) + '</div><h3>' + heading + '</h3><div class="meta">Score ' + esc(x.deal_score ?? '—') + '/100 · ' + esc(x.recommended_channel || 'Channel unconfirmed') + '</div></div></div><div class="facts"><div><small>' + (auction ? 'Cost at current bid' : 'Buy cost') + '</small><strong>' + money(x.total_buy_cost) + '</strong></div><div><small>' + (auction ? 'Bid up to' : 'Suggested offer') + '</small><strong>' + money(x.suggested_offer) + '</strong></div><div><small>Projected profit</small><strong class="profit">' + money(x.estimated_profit) + '</strong></div></div><p class="reason">' + (x.deal_type === 'flip' ? 'Working flip, no repair planned' : 'Possible repair: ' + esc(x.likely_issue || 'Unknown') + ' · Parts estimate ' + money(x.estimated_parts_cost)) + ' · Local asking-price estimate ' + money(x.estimated_resale_local) + '</p><div class="actions">' + (url ? '<a class="link" target="_blank" rel="noopener noreferrer" href="' + esc(url) + '">Inspect on eBay ↗</a>' : '<span class="caution">Listing link unavailable</span>') + mine + '</div></article>';
     }).join('') : empty('No matching deals','Try another category or check back after the next scan.');
   }
   function renderListings() {
@@ -142,7 +168,7 @@ export function renderDashboard() {
     $('listings').innerHTML = rows.length ? rows.map(x => {
       const url=ebayUrl(x.item_url), title=esc(x.title || 'Untitled listing');
       const label=esc(x.recommendation || x.analysis_status || 'REVIEW');
-      return '<div class="list-row"><span class="tag ' + (x.recommendation === 'PASS' ? 'pass' : 'watch') + '">' + label + '</span><div class="item"><strong>' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + title + '</a>' : title) + '</strong><small>' + esc(x.category || 'Other') + ' · ' + esc(when(x.first_seen_at)) + '</small></div><div class="numbers">' + money(x.total_buy_cost) + '<br>Score ' + esc(x.deal_score ?? '—') + '</div></div>';
+      return '<div class="list-row"><span class="tag ' + (x.recommendation === 'PASS' ? 'pass' : 'watch') + '">' + label + '</span><div class="item"><strong>' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + title + '</a>' : title) + '</strong><small>' + esc(kind(x)) + ' · ' + esc(x.category || 'Other') + ' · ' + esc(when(x.first_seen_at)) + '</small></div><div class="numbers">' + money(x.total_buy_cost) + '<br>Score ' + esc(x.deal_score ?? '—') + '</div></div>';
     }).join('') : empty('No matching listings','Try clearing the search or category filter.');
   }
   function renderOperations() {
@@ -150,16 +176,136 @@ export function renderDashboard() {
     $('runs').innerHTML = (d.recentCycles || []).slice(0,8).map(x => { let summary={}; try {summary=JSON.parse(x.summary || '{}');} catch {} return '<div class="run"><span>' + esc(when(x.started_at)) + '</span><strong>' + esc(x.status || 'Unknown') + (x.error ? ' · ' + esc(x.error) : '') + '</strong><span>' + esc(summary.newListings ?? '—') + ' new · ' + esc(summary.alerted ?? '—') + ' alerts</span></div>'; }).join('') || empty('No cycle history','Diagnostics are unavailable or scans have not run yet.');
     $('queue').innerHTML = (d.queue || []).filter(x => x.analysis_status === 'details_ready' || x.recommendation === 'BUY' || x.recommendation === 'WATCH').map(x => '<div class="run"><span>' + esc(x.category || 'Other') + '</span><strong>' + esc(x.analysis_status || '') + ' · ' + esc(x.recommendation || '') + '</strong><span>' + esc(x.count || 0) + ' listings</span></div>').join('') || empty('Queue is clear','No current ready items were reported.');
   }
+  const STATUS_LABELS = { purchased:'Bought', repairing:'Repairing', listed:'Listed for sale', sold:'Sold', failed:'Could not fix' };
+  function renderFlips() {
+    if (state.inventoryLocked) {
+      $('flips').innerHTML = '<div class="empty"><strong>Sign in to track your flips</strong>Your flips are private. <a class="link" href="/login">Sign in</a></div>';
+      return;
+    }
+    const s = state.inventory.summary || {}, items = state.inventory.items || [];
+    const signed = v => v === null || v === undefined ? '—' : (Number(v) < 0 ? '-$' + Math.abs(Number(v)).toFixed(2) : '$' + Number(v).toFixed(2));
+    const metrics = '<section class="metrics" aria-label="Flip results"><div class="metric"><small>Profit so far</small><strong class="' + (Number(s.totalProfit) < 0 ? 'loss' : 'gain') + '">' + signed(s.totalProfit ?? 0) + '</strong><em>' + esc(s.sold || 0) + ' sold · ' + esc(s.failed || 0) + ' could not fix</em></div><div class="metric"><small>Average per flip</small><strong>' + signed(s.averageProfit) + '</strong><em>After fees, parts and shipping</em></div><div class="metric"><small>Money tied up</small><strong>' + signed(s.moneyTiedUp ?? 0) + '</strong><em>' + esc(s.open || 0) + ' item' + (s.open === 1 ? '' : 's') + ' not sold yet</em></div><div class="metric"><small>vs BagSpec estimate</small><strong>' + signed(s.averageVsEstimate) + '</strong><em>Average per sold flip (+ means better)</em></div></section>';
+    const tools = '<div class="flip-tools"><button class="btn small primary" type="button" data-add="1">+ Add an item</button><span class="hint">Use this for things you bought anywhere, like Facebook Marketplace.</span></div>';
+    const rows = items.map(x => {
+      const url = ebayUrl(x.item_url);
+      const name = esc(x.item_name || 'Item');
+      const profit = x.profit;
+      const right = x.status === 'sold' || x.status === 'failed'
+        ? '<strong class="' + (Number(profit) < 0 ? 'loss' : 'gain') + '">' + signed(profit) + '</strong>' + (x.status === 'sold' ? 'sold ' + money(x.sale_price) + (x.sale_channel === 'Local' ? ' locally' : x.sale_channel ? ' on ' + esc(x.sale_channel) : '') : 'loss')
+        : '<strong>' + money(x.cost) + '</strong>spent so far' + (x.estimated_profit !== null && x.estimated_profit !== undefined ? '<br>BagSpec guessed ' + money(x.estimated_profit) + ' profit' : '');
+      return '<div class="flip-row"><div class="item"><strong>' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + name + '</a>' : name) + '</strong><small><span class="tag ' + (x.status === 'sold' ? '' : x.status === 'failed' ? 'pass' : 'watch') + '">' + esc(STATUS_LABELS[x.status] || x.status) + '</span> · paid ' + money(x.purchase_price) + ' + ' + money(x.inbound_shipping) + ' shipping + ' + money(x.sales_tax) + ' tax · parts ' + money(x.parts_cost) + ' · ' + esc(when(x.purchased_at)) + (x.notes ? ' · ' + esc(x.notes) : '') + '</small></div><div class="money">' + right + '</div><div class="buttons"><button class="btn small" type="button" data-edit="' + esc(x.id) + '">Update</button>' + (x.status === 'sold' ? '' : '<button class="btn small primary" type="button" data-sold="' + esc(x.id) + '">Mark sold</button>') + '<button class="btn small" type="button" data-delete="' + esc(x.id) + '">Delete</button></div></div>';
+    }).join('');
+    $('flips').innerHTML = metrics + tools + (rows ? '<div class="list">' + rows + '</div>' : empty('No flips yet','When you buy something, press "I bought this" on the deal, or "+ Add an item".'));
+  }
+  let dlgSubmit = null;
+  function openForm(title, fields, submitLabel, onSubmit) {
+    $('dlg-title').textContent = title;
+    $('dlg-error').textContent = '';
+    $('dlg-submit').textContent = submitLabel;
+    $('dlg-fields').innerHTML = fields.map(f => {
+      if (f.type === 'hidden') return '<input type="hidden" name="' + esc(f.name) + '" value="' + esc(f.value ?? '') + '">';
+      const control = f.options
+        ? '<select class="select" name="' + esc(f.name) + '">' + f.options.map(o => '<option value="' + esc(o[0]) + '"' + (String(o[0]) === String(f.value ?? '') ? ' selected' : '') + '>' + esc(o[1]) + '</option>').join('') + '</select>'
+        : '<input class="input" name="' + esc(f.name) + '" ' + (f.type === 'money' ? 'type="number" step="0.01" min="0" inputmode="decimal"' : 'type="text"') + ' value="' + esc(f.value ?? '') + '"' + (f.placeholder ? ' placeholder="' + esc(f.placeholder) + '"' : '') + (f.required ? ' required' : '') + '>';
+      return '<label>' + esc(f.label) + control + (f.hint ? '<span class="hint">' + esc(f.hint) + '</span>' : '') + '</label>';
+    }).join('');
+    dlgSubmit = onSubmit;
+    $('dlg').showModal();
+    const first = $('dlg-fields').querySelector('input:not([type=hidden]),select');
+    if (first) first.focus();
+  }
+  async function send(path, body) {
+    const r = await fetch(path, { method:'POST', headers:{ 'Content-Type':'application/json', 'X-BagSpec-Quiet':'1' }, body: JSON.stringify(body) });
+    if (r.status === 401) throw new Error('Please sign in first (link on the My flips tab).');
+    if (!r.ok) { let message = 'Could not save'; try { message = (await r.json()).error || message; } catch {} throw new Error(message); }
+    return r.json();
+  }
+  async function loadInventory() {
+    const r = await fetch('/api/inventory', { cache:'no-store', headers:{ 'X-BagSpec-Quiet':'1' } });
+    if (r.status === 401) { state.inventoryLocked = true; return; }
+    if (!r.ok) throw new Error('/api/inventory returned ' + r.status);
+    state.inventoryLocked = false;
+    state.inventory = await r.json();
+  }
+  function startBuy(id) {
+    const x = state.deals.find(d => String(d.id) === String(id));
+    if (!x) return;
+    const auction = x.deal_type === 'auction';
+    openForm('I bought this', [
+      { name:'listingId', type:'hidden', value:x.id },
+      { name:'purchasePrice', label: auction ? 'Winning bid ($)' : 'Price paid ($)', type:'money', value: auction ? '' : x.price, required:true },
+      { name:'inboundShipping', label:'Shipping paid ($)', type:'money', value:x.shipping_cost },
+      { name:'salesTax', label:'Sales tax ($)', type:'money', value:'', placeholder:'Leave blank to estimate 6%' },
+      { name:'partsCost', label:'Parts bought so far ($)', type:'money', value:'' },
+      { name:'notes', label:'Notes', value:'', placeholder:'e.g. ordered a hinge from Amazon' },
+    ], 'Save to My flips', async values => { await send('/api/inventory', values); });
+  }
+  function startAdd() {
+    openForm('Add an item', [
+      { name:'itemName', label:'What is it?', value:'', required:true, placeholder:'e.g. Nintendo 3DS XL, broken hinge' },
+      { name:'purchasePrice', label:'Price paid ($)', type:'money', value:'', required:true },
+      { name:'inboundShipping', label:'Shipping paid ($)', type:'money', value:'0' },
+      { name:'salesTax', label:'Sales tax ($)', type:'money', value:'', placeholder:'Leave blank to estimate 6%', hint:'Put 0 for cash local buys with no tax.' },
+      { name:'partsCost', label:'Parts bought so far ($)', type:'money', value:'' },
+      { name:'notes', label:'Notes', value:'', placeholder:'e.g. Facebook Marketplace, Rexburg' },
+    ], 'Add item', async values => { await send('/api/inventory', values); });
+  }
+  function startEdit(id) {
+    const x = (state.inventory.items || []).find(i => String(i.id) === String(id));
+    if (!x) return;
+    openForm('Update ' + (x.item_name || 'item'), [
+      { name:'status', label:'Status', value:x.status, options:[['purchased','Bought'],['repairing','Repairing'],['listed','Listed for sale'],['failed','Could not fix (count as a loss)']].concat(x.status === 'sold' ? [['sold','Sold']] : []) },
+      { name:'partsCost', label:'Total spent on parts ($)', type:'money', value:x.parts_cost },
+      { name:'packingCost', label:'Packing supplies ($)', type:'money', value:x.packing_cost },
+      { name:'purchasePrice', label:'Price paid ($)', type:'money', value:x.purchase_price },
+      { name:'inboundShipping', label:'Shipping paid ($)', type:'money', value:x.inbound_shipping },
+      { name:'notes', label:'Notes', value:x.notes || '' },
+    ], 'Save', async values => { await send('/api/inventory/' + x.id, values); });
+  }
+  function startSold(id) {
+    const x = (state.inventory.items || []).find(i => String(i.id) === String(id));
+    if (!x) return;
+    openForm('Mark sold: ' + (x.item_name || 'item'), [
+      { name:'status', type:'hidden', value:'sold' },
+      { name:'salePrice', label:'Sold for ($)', type:'money', value:'', required:true, hint:'On eBay, use what the buyer paid including shipping.' },
+      { name:'saleChannel', label:'Where', value:'eBay', options:[['eBay','eBay'],['Local','Local (Facebook, campus, etc.)'],['Other','Other']] },
+      { name:'sellingFees', label:'Selling fees ($)', type:'money', value:'', placeholder:'Leave blank to estimate eBay fees' },
+      { name:'outboundShipping', label:'Shipping you paid ($)', type:'money', value:'' },
+      { name:'partsCost', label:'Total spent on parts ($)', type:'money', value:x.parts_cost },
+    ], 'Mark sold', async values => { await send('/api/inventory/' + x.id, values); });
+  }
+  $('dlg-cancel').addEventListener('click', () => $('dlg').close());
+  $('dlg-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const values = {};
+    new FormData($('dlg-form')).forEach((v, k) => { if (String(v).trim() !== '') values[k] = String(v).trim(); });
+    $('dlg-submit').disabled = true; $('dlg-error').textContent = '';
+    try { await dlgSubmit(values); $('dlg').close(); await refresh(); }
+    catch (error) { $('dlg-error').textContent = error.message; }
+    finally { $('dlg-submit').disabled = false; }
+  });
+  document.addEventListener('click', async event => {
+    const t = event.target.closest('[data-buy],[data-add],[data-edit],[data-sold],[data-delete]');
+    if (!t) return;
+    if (t.dataset.buy) return startBuy(t.dataset.buy);
+    if (t.dataset.add) return startAdd();
+    if (t.dataset.edit) return startEdit(t.dataset.edit);
+    if (t.dataset.sold) return startSold(t.dataset.sold);
+    if (t.dataset.delete && confirm('Delete this item from My flips? This cannot be undone.')) {
+      try { await send('/api/inventory/' + t.dataset.delete + '/delete', {}); await refresh(); } catch (error) { alert(error.message); }
+    }
+  });
   function render() {
     document.querySelectorAll('.tab').forEach(x => { const on=x.dataset.tab === state.tab; x.classList.toggle('active',on); x.setAttribute('aria-selected',String(on)); x.tabIndex=on ? 0 : -1; });
-    ['deals','listings','operations'].forEach(id => $(id).hidden = id !== state.tab);
-    $('search').hidden = $('sort').hidden = state.tab === 'operations';
-    renderChips(); renderDeals(); renderListings(); renderOperations();
+    ['deals','listings','flips','operations'].forEach(id => $(id).hidden = id !== state.tab);
+    $('search').hidden = $('sort').hidden = state.tab === 'operations' || state.tab === 'flips';
+    renderChips(); if (state.tab === 'flips') $('chips').hidden = true;
+    renderDeals(); renderListings(); renderFlips(); renderOperations();
   }
   async function read(path) { const r=await fetch(path,{cache:'no-store'}); if (!r.ok) throw new Error(path + ' returned ' + r.status); return r.json(); }
   async function refresh() {
     $('refresh').disabled=true; $('load-state').textContent='Updating…';
-    const results=await Promise.allSettled([read('/deals'),read('/listings'),read('/diagnostics')]);
+    const results=await Promise.allSettled([read('/deals'),read('/listings'),read('/diagnostics'),loadInventory()]);
     if (results[0].status==='fulfilled') state.deals=results[0].value.deals || [];
     if (results[1].status==='fulfilled') state.listings=results[1].value.listings || [];
     if (results[2].status==='fulfilled') state.diagnostics=results[2].value;

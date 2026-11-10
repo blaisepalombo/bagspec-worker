@@ -1,4 +1,5 @@
 import { renderDashboard } from "./dashboard.js";
+import { ensureInventoryTable, handleInventoryRequest } from "./inventory.js";
 import {
   CLAUDE_MODEL,
   CLAUDE_SCREEN_MODEL,
@@ -35,6 +36,21 @@ export default {
       }
     }
 
+    // "My flips" tracker. Checked before the eBay catch-all below, which
+    // answers every other POST. Always needs the admin login.
+    if (url.pathname === "/api/inventory" || url.pathname.startsWith("/api/inventory/")) {
+      if (!isAuthorized(request, env)) {
+        // The dashboard asks quietly so visitors who are not signed in get
+        // a "Sign in" link instead of a password pop-up.
+        const quiet = request.headers.get("X-BagSpec-Quiet") === "1";
+        return new Response("BagSpec login required", {
+          status: 401,
+          headers: quiet ? {} : { "WWW-Authenticate": 'Basic realm="BagSpec Admin"' },
+        });
+      }
+      return handleInventoryRequest(request, env, url);
+    }
+
     // Acknowledge eBay deletion notifications
     if (request.method === "POST") {
       return new Response(null, { status: 204 });
@@ -65,6 +81,11 @@ export default {
           "WWW-Authenticate": 'Basic realm="BagSpec Admin"',
         },
       });
+    }
+
+    // Signing in here lets the dashboard load the private "My flips" data.
+    if (url.pathname === "/login") {
+      return Response.redirect(url.origin + "/dashboard#flips", 302);
     }
 
     if (url.pathname === "/dashboard") {
@@ -237,6 +258,7 @@ export default {
 
     if (url.pathname === "/deals") {
       await ensureRuntimeTables(env);
+      await ensureInventoryTable(env);
       const { results } = await env.DB.prepare(`
         SELECT
           id,
@@ -244,6 +266,11 @@ export default {
           item_url,
           image_url,
           category,
+          price,
+          shipping_cost,
+          estimated_tax,
+          item_end_date,
+          (SELECT MAX(i.id) FROM inventory i WHERE i.listing_id = listings.id) AS inventory_id,
           total_buy_cost,
           likely_issue,
           estimated_parts_cost,
