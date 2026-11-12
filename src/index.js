@@ -257,6 +257,10 @@ export default {
     }
 
     if (url.pathname === "/deals") {
+      // Every BUY and WATCH stays in the history, newest first, 100 per page.
+      // Pass ?before=<id> (the previous page's nextBefore) for older deals.
+      const before = Number(url.searchParams.get("before")) || null;
+      return savedJsonResponse(`deals-${authorized ? "admin" : "public"}`, !before, async () => {
       await ensureRuntimeTables(env);
       await ensureInventoryTable(env);
       const { results } = await env.DB.prepare(`
@@ -288,20 +292,22 @@ export default {
           first_seen_at
         FROM listings
         WHERE recommendation IN ('BUY', 'WATCH')
-        ORDER BY
-          CASE recommendation WHEN 'BUY' THEN 0 ELSE 1 END,
-          deal_score DESC,
-          first_seen_at DESC
-        LIMIT 100
-      `).all();
+          AND (? IS NULL OR id < ?)
+        ORDER BY id DESC
+        LIMIT ?
+      `).bind(before, before, DEALS_PAGE_SIZE + 1).all();
 
-      return Response.json({
-        count: results.length,
-        deals: authorized ? results : results.map(({ reasoning, ...deal }) => deal),
+      const page = results.slice(0, DEALS_PAGE_SIZE);
+      return {
+        count: page.length,
+        nextBefore: results.length > DEALS_PAGE_SIZE ? page[page.length - 1].id : null,
+        deals: authorized ? page : page.map(({ reasoning, ...deal }) => deal),
+      };
       });
     }
 
     if (url.pathname === "/listings") {
+      return savedJsonResponse(`listings-${authorized ? "admin" : "public"}`, true, async () => {
       await ensureRuntimeTables(env);
       const { results } = await env.DB.prepare(`
         SELECT
@@ -327,9 +333,10 @@ export default {
         LIMIT 100
       `).all();
 
-      return Response.json({
+      return {
         count: results.length,
         listings: authorized ? results : results.map(({ reasoning, ...listing }) => listing),
+      };
       });
     }
 
@@ -340,6 +347,44 @@ export default {
     ctx.waitUntil(runAutomatedCycle(env));
   },
 };
+
+const DEALS_PAGE_SIZE = 100;
+
+// Keep the last good dashboard response in Cloudflare's cache so the page
+// still shows saved deals when D1 is unavailable (for example after the
+// free daily read limit is reached). The cache key is never served directly.
+async function savedJsonResponse(name, saveCopy, load) {
+  const key = new Request(`https://bagspec.com/__saved/${name}`);
+  try {
+    const body = { ...(await load()), savedAt: new Date().toISOString() };
+    if (saveCopy) {
+      try {
+        await caches.default.put(key, new Response(JSON.stringify(body), {
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": "max-age=1209600",
+          },
+        }));
+      } catch (error) {
+        console.error("Could not save dashboard copy", error);
+      }
+    }
+    return Response.json(body);
+  } catch (error) {
+    const saved = saveCopy ? await caches.default.match(key).catch(() => null) : null;
+    if (saved) {
+      return Response.json({
+        ...(await saved.json()),
+        stale: true,
+        staleReason: String(error.message || error).slice(0, 200),
+      });
+    }
+    return Response.json(
+      { error: "Data unavailable", details: String(error.message || error).slice(0, 300) },
+      { status: 503 }
+    );
+  }
+}
 
 function isAuthorized(request, env) {
   const authorization = request.headers.get("Authorization") || "";
