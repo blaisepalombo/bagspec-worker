@@ -84,6 +84,7 @@ export function renderDashboard() {
     .btn.primary { background:var(--accent); color:#07120b; border-color:var(--accent); }
     .tag.auction { color:#9fc7ff; border-color:#3d5f86; } .tag.mine { color:#07120b; background:var(--accent); border-color:var(--accent); }
     .ends { color:#9fc7ff; font-weight:650; }
+    .more { display:flex; justify-content:center; padding:8px 0 4px; }
     .flip-tools { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 14px; }
     .flip-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px 16px; padding:14px 16px; background:var(--surface); border:1px solid var(--line); border-radius:8px; }
     .flip-row .item strong { display:block; font-size:15px; } .flip-row .item small { color:var(--muted); font-size:13px; }
@@ -113,7 +114,7 @@ export function renderDashboard() {
   <header><a class="brand" href="/dashboard" aria-label="BagSpec dashboard">BagSpec</a><div class="header-right"><span class="status"><span class="dot" aria-hidden="true"></span>Scanner runs every 5 minutes</span><button class="btn" id="refresh" type="button">Refresh data</button></div></header>
   <main id="main">
     <div class="hero"><div><div class="eyebrow">eBay repair scanner</div><h1>Dashboard</h1><p class="sub">Review new listings and scanner results. Check every listing yourself before buying.</p></div><p class="hero-note" id="updated">Loading data…</p></div>
-    <section class="metrics" aria-label="Scanner summary"><div class="metric"><small>Deals shown</small><strong id="m-deals">—</strong><em>Up to 100 BUY and WATCH leads</em></div><div class="metric"><small>Listings shown</small><strong id="m-listings">—</strong><em>Latest 100 listings</em></div><div class="metric"><small>New in latest scan</small><strong id="m-new">—</strong><em id="m-scan-time">Waiting for data</em></div><div class="metric"><small>Scanner status</small><strong id="m-cycle">—</strong><em id="m-cycle-time">Waiting for data</em></div></section>
+    <section class="metrics" aria-label="Scanner summary"><div class="metric"><small>Deals shown</small><strong id="m-deals">—</strong><em>BUY and WATCH history</em></div><div class="metric"><small>Listings shown</small><strong id="m-listings">—</strong><em>Latest 100 listings</em></div><div class="metric"><small>New in latest scan</small><strong id="m-new">—</strong><em id="m-scan-time">Waiting for data</em></div><div class="metric"><small>Scanner status</small><strong id="m-cycle">—</strong><em id="m-cycle-time">Waiting for data</em></div></section>
     <div class="section-top"><h2>Results</h2><span class="caution" id="load-state" role="status" aria-live="polite"></span></div>
     <div class="controls"><div class="tabs" role="tablist" aria-label="Dashboard sections"><button id="tab-deals" class="tab active" data-tab="deals" type="button" role="tab" aria-controls="deals" aria-selected="true" tabindex="0">Deals</button><button id="tab-listings" class="tab" data-tab="listings" type="button" role="tab" aria-controls="listings" aria-selected="false" tabindex="-1">New listings</button><button id="tab-flips" class="tab" data-tab="flips" type="button" role="tab" aria-controls="flips" aria-selected="false" tabindex="-1">My flips</button><button id="tab-operations" class="tab" data-tab="operations" type="button" role="tab" aria-controls="operations" aria-selected="false" tabindex="-1">Operations</button></div><label class="visually-hidden" for="search">Search titles and categories</label><input id="search" class="input" type="search" placeholder="Search titles and categories" autocomplete="off"><label class="visually-hidden" for="sort">Sort results</label><select id="sort" class="select"><option value="newest">Newest first</option><option value="score">Highest score</option><option value="profit">Projected profit</option></select></div>
     <div id="chips" class="chips" role="group" aria-label="Filter by category"></div>
@@ -125,7 +126,7 @@ export function renderDashboard() {
 <script>
 (() => {
   const $ = id => document.getElementById(id);
-  const state = { tab: location.hash === '#flips' ? 'flips' : 'deals', category:'All', deals:[], listings:[], diagnostics:null, inventory:{ items:[], summary:{} }, inventoryLocked:false };
+  const state = { tab: location.hash === '#flips' ? 'flips' : 'deals', category:'All', deals:[], nextBefore:null, loadingOlder:false, stale:null, listings:[], diagnostics:null, inventory:{ items:[], summary:{} }, inventoryLocked:false };
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const money = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) ? '$' + Number(value).toFixed(2) : '—';
   const date = value => { if (!value) return null; const d = new Date(String(value).includes('T') ? value : String(value).replace(' ', 'T') + 'Z'); return Number.isNaN(d.getTime()) ? null : d; };
@@ -161,7 +162,23 @@ export function renderDashboard() {
       const typeTag = auction ? '<span class="tag auction">Auction</span> <span class="ends">' + esc(timeLeft(x.item_end_date)) + '</span>' : kind(x);
       const mine = x.inventory_id ? '<span class="tag mine">In My flips</span>' : '<button class="btn small" type="button" data-buy="' + esc(x.id) + '">I bought this</button>';
       return '<article class="deal"><div class="deal-head">' + pic + '<div class="deal-body"><div class="meta"><span class="tag ' + (x.recommendation === 'BUY' ? '' : 'watch') + '">' + label + '</span>' + typeTag + ' · ' + esc(x.category || 'Other') + ' · ' + esc(when(x.first_seen_at)) + '</div><h3>' + heading + '</h3><div class="meta">Score ' + esc(x.deal_score ?? '—') + '/100 · ' + esc(x.recommended_channel || 'Channel unconfirmed') + '</div></div></div><div class="facts"><div><small>' + (auction ? 'Cost at current bid' : 'Buy cost') + '</small><strong>' + money(x.total_buy_cost) + '</strong></div><div><small>' + (auction ? 'Bid up to' : 'Suggested offer') + '</small><strong>' + money(x.suggested_offer) + '</strong></div><div><small>Projected profit</small><strong class="profit">' + money(x.estimated_profit) + '</strong></div></div><p class="reason">' + (x.deal_type === 'flip' ? 'Working flip, no repair planned' : 'Possible repair: ' + esc(x.likely_issue || 'Unknown') + ' · Parts estimate ' + money(x.estimated_parts_cost)) + ' · Local asking-price estimate ' + money(x.estimated_resale_local) + '</p><div class="actions">' + (url ? '<a class="link" target="_blank" rel="noopener noreferrer" href="' + esc(url) + '">Inspect on eBay ↗</a>' : '<span class="caution">Listing link unavailable</span>') + mine + '</div></article>';
-    }).join('') : empty('No matching deals','Try another category or check back after the next scan.');
+    }).join('') + olderButton() : empty('No matching deals','Try another category or check back after the next scan.') + olderButton();
+  }
+  function olderButton() {
+    if (!state.nextBefore) return '';
+    return '<div class="more"><button class="btn" type="button" data-older="1"' + (state.loadingOlder ? ' disabled' : '') + '>' + (state.loadingOlder ? 'Loading…' : 'Load older deals') + '</button></div>';
+  }
+  async function loadOlder() {
+    if (!state.nextBefore || state.loadingOlder) return;
+    state.loadingOlder = true; renderDeals();
+    try {
+      const page = await read('/deals?before=' + encodeURIComponent(state.nextBefore));
+      const seen = new Set(state.deals.map(x => x.id));
+      state.deals = state.deals.concat((page.deals || []).filter(x => !seen.has(x.id)));
+      state.nextBefore = page.nextBefore || null;
+      $('m-deals').textContent = String(state.deals.length);
+    } catch (error) { alert('Could not load older deals: ' + error.message); }
+    finally { state.loadingOlder = false; renderDeals(); }
   }
   function renderListings() {
     const rows = filtered(state.listings);
@@ -285,8 +302,9 @@ export function renderDashboard() {
     finally { $('dlg-submit').disabled = false; }
   });
   document.addEventListener('click', async event => {
-    const t = event.target.closest('[data-buy],[data-add],[data-edit],[data-sold],[data-delete]');
+    const t = event.target.closest('[data-buy],[data-add],[data-edit],[data-sold],[data-delete],[data-older]');
     if (!t) return;
+    if (t.dataset.older) return loadOlder();
     if (t.dataset.buy) return startBuy(t.dataset.buy);
     if (t.dataset.add) return startAdd();
     if (t.dataset.edit) return startEdit(t.dataset.edit);
@@ -306,8 +324,10 @@ export function renderDashboard() {
   async function refresh() {
     $('refresh').disabled=true; $('load-state').textContent='Updating…';
     const results=await Promise.allSettled([read('/deals'),read('/listings'),read('/diagnostics'),loadInventory()]);
-    if (results[0].status==='fulfilled') state.deals=results[0].value.deals || [];
+    if (results[0].status==='fulfilled') { state.deals=results[0].value.deals || []; state.nextBefore=results[0].value.nextBefore || null; }
     if (results[1].status==='fulfilled') state.listings=results[1].value.listings || [];
+    const staleCopy=results.slice(0,2).find(x => x.status==='fulfilled' && x.value.stale);
+    state.stale=staleCopy ? staleCopy.value.savedAt : null;
     if (results[2].status==='fulfilled') state.diagnostics=results[2].value;
     const scan=state.diagnostics?.recentScans?.[0], cycle=state.diagnostics?.recentCycles?.[0];
     $('m-deals').textContent=results[0].status==='fulfilled' ? String(state.deals.length) : '—';
@@ -317,7 +337,7 @@ export function renderDashboard() {
     const fresh=cycleTime && Date.now()-cycleTime.getTime() < 15*60*1000;
     $('m-cycle').textContent=cycle ? (cycle.status === 'completed' && fresh ? 'Running' : 'Check') : '—'; $('m-cycle-time').textContent=cycle ? 'Last cycle ' + when(cycle.completed_at || cycle.started_at) : 'Cycle data unavailable';
     const failures=results.filter(x => x.status==='rejected').length;
-    $('load-state').textContent=failures ? failures + ' data source' + (failures===1 ? '' : 's') + ' unavailable' : 'Live data loaded';
+    $('load-state').textContent=state.stale ? 'Database unavailable · showing saved deals from ' + when(state.stale) : failures ? failures + ' data source' + (failures===1 ? '' : 's') + ' unavailable' : 'Live data loaded';
     $('updated').textContent='Updated ' + new Intl.DateTimeFormat(undefined,{hour:'numeric',minute:'2-digit'}).format(new Date());
     $('refresh').disabled=false; render();
   }
