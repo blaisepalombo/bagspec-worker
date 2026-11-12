@@ -1829,8 +1829,32 @@ async function prefilterExisting(env) {
   };
 }
 
+// Queue queries can't use the creation-date index once live auctions are
+// OR'd in, so every waiting row is read on each pass. Move rows that have
+// aged out of the 12-hour window (except auctions still running) out of
+// the queue so those reads stay proportional to live work.
+async function expireStaleCandidates(env) {
+  const result = await env.DB.prepare(`
+    UPDATE listings
+    SET status = 'expired'
+    WHERE status = 'candidate'
+      AND analysis_status IN ('awaiting_details', 'details_ready')
+      AND item_creation_date < datetime('now', '-12 hours')
+      AND NOT (
+        deal_type = 'auction'
+        AND COALESCE(julianday(item_end_date), 0) > julianday('now', '+5 minutes')
+      )
+  `).run();
+  return Number(result.meta?.changes || 0);
+}
+
 async function runAutomatedCycle(env) {
   await ensureRuntimeTables(env);
+  try {
+    await expireStaleCandidates(env);
+  } catch (error) {
+    console.error("Could not expire stale candidates", error);
+  }
   const run = await env.DB.prepare(`
     INSERT INTO cycle_runs (status) VALUES ('running')
   `).run();
@@ -2240,10 +2264,9 @@ async function getDiagnostics(env) {
       env.DB.prepare(`
         SELECT category, analysis_status, COUNT(*) AS count
         FROM listings
-        WHERE status = 'candidate'
+        WHERE status = 'expired'
           AND analysis_status IN ('awaiting_details', 'details_ready')
           AND item_creation_date >= datetime('now', '-24 hours')
-          AND item_creation_date < datetime('now', '-12 hours')
         GROUP BY category, analysis_status
       `).all(),
     ]);
