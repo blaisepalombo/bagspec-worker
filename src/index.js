@@ -4262,7 +4262,7 @@ function applyDeterministicRepairRules(
   return analysis;
 }
 
-async function findWorkingComparables(
+export async function findWorkingComparables(
   env,
   searchQuery,
   category = "",
@@ -4276,16 +4276,39 @@ async function findWorkingComparables(
     .trim()
     .split(/\s+/)
     .filter(Boolean);
-  const searchQueries = [
-    buildComparableSearchQuery(originalWords, category),
-  ];
-
+  const query = buildComparableSearchQuery(originalWords, category);
+  const searchQueries = [query];
   const minimumComparablePrice = getMinimumComparablePrice(category);
+  const select = (items) => selectComparables(items, {
+    originalWords,
+    category,
+    requiredModel,
+    excludedItemId,
+    searchQueries,
+  });
 
-  const itemSummaries = [];
-  const seenItemIds = new Set();
+  // The search floor is a little under the real one so a cheap item whose
+  // shipping lifts it over the floor still counts.
+  const first = await searchComparableListings(
+    accessToken, query, categoryProfile, minimumComparablePrice * 0.85);
+  const result = select(first.items);
 
-  for (const query of searchQueries) {
+  // Popular models (TI-83, TI-84) have thousands of listings, so the 200
+  // cheapest were all just under the real floor and every one was thrown
+  // out: 0 comparables for the commonest, best-selling models. When the
+  // page was full and too little survived, search again from the real floor.
+  if (result.count < 3 && first.total > first.items.length) {
+    const second = await searchComparableListings(
+      accessToken, query, categoryProfile, minimumComparablePrice);
+    return { ...select(second.items), searchRetriedAtFloor: true };
+  }
+  return result;
+}
+
+// One eBay search for working listings, cheapest first, priced at or above
+// priceFloor (eBay filters on item price without shipping).
+async function searchComparableListings(accessToken, query, categoryProfile, priceFloor) {
+  {
     const searchUrl = new URL(
       "https://api.ebay.com/buy/browse/v1/item_summary/search"
     );
@@ -4307,10 +4330,9 @@ async function findWorkingComparables(
     searchUrl.searchParams.set(
       "filter",
       // Sorting by price would otherwise fill the results with accessories
-      // and parts priced below any complete working unit. The API filters on
-      // item price without shipping, so the floor is slightly loosened here
-      // and the exact floor is applied to price plus shipping below.
-      `conditions:{USED},itemLocationCountry:US,price:[${Math.floor(minimumComparablePrice * 0.85)}..],priceCurrency:USD`
+      // and parts priced below any complete working unit. selectComparables
+      // applies the exact floor to price plus shipping afterwards.
+      `conditions:{USED},itemLocationCountry:US,price:[${Math.floor(priceFloor)}..],priceCurrency:USD`
     );
 
     const response = await fetch(searchUrl, {
@@ -4327,24 +4349,19 @@ async function findWorkingComparables(
     }
 
     const data = await response.json();
+    const seenItemIds = new Set();
+    const items = [];
 
     for (const item of data.itemSummaries || []) {
       const itemId = item.itemId || item.itemWebUrl || item.title;
 
       if (!seenItemIds.has(itemId)) {
         seenItemIds.add(itemId);
-        itemSummaries.push(item);
+        items.push(item);
       }
     }
+    return { items, total: Number(data.total) || items.length };
   }
-
-  return selectComparables(itemSummaries, {
-    originalWords,
-    category,
-    requiredModel,
-    excludedItemId,
-    searchQueries,
-  });
 }
 
 // Pure matching step: decides which eBay results are the same working
@@ -4812,7 +4829,11 @@ function soldEvidenceReference(query, row) {
   };
 }
 
-function buildComparableSearchQuery(words, category) {
+// Words right after a model number that make it a different, differently
+// priced product: TI-84 Plus CE vs TI-84 Plus, 3DS XL vs 3DS, Switch Lite.
+const MODEL_VARIANT_WORD = /^(?:plus|\+|ce|se|xl|ll|lite|pro|max|mini|ultra)$/i;
+
+export function buildComparableSearchQuery(words, category) {
   const clean = words.filter((word) =>
     !/^(?:parts?|repair|broken|working|used|notebook|black|white|silver|gold|ntsc[-/]?[a-z/]*|\d+(?:-inch|inch|in))$/i.test(word)
   );
@@ -4825,8 +4846,13 @@ function buildComparableSearchQuery(words, category) {
       (!isGameConsole && index >= 2 && /^\d{4,5}$/.test(word) &&
         !/^20\d{2}$/.test(word)))
   );
+  let modelEnd = modelIndex + 1;
+  while (modelIndex >= 0 && modelEnd < clean.length && modelEnd - modelIndex <= 2 &&
+    MODEL_VARIANT_WORD.test(clean[modelEnd])) {
+    modelEnd += 1;
+  }
   const width = modelIndex >= 0
-    ? Math.min(modelIndex + 1, 6)
+    ? Math.min(modelEnd, 7)
     : isGameConsole ? 4 : 5;
   return clean.slice(0, width).join(' ') || words.slice(0, 4).join(' ');
 }
