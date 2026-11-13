@@ -137,6 +137,14 @@ class SettingsScreenState extends State<SettingsScreen> {
               ),
               const Divider(height: 1),
               SwitchListTile(
+                key: const Key('watch-switch'),
+                title: const Text('WATCH deals'),
+                subtitle: const Text('Good numbers, one thing unconfirmed'),
+                value: _settings.watch,
+                onChanged: _busy ? null : (v) => _change(_settings.copyWith(watch: v)),
+              ),
+              const Divider(height: 1),
+              SwitchListTile(
                 title: const Text('Daily digest'),
                 subtitle: const Text('Top near-deals after 7 PM'),
                 value: _settings.digest,

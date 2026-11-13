@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import worker, { sendDailyWatchDigest, sendPendingDealAlerts } from "../src/index.js";
-import { dealNotification, providerToken } from "../src/push.js";
+import { dealNotification, providerToken, sendWatchAlerts } from "../src/push.js";
 
 function fakeD1(db) {
   const statement = (sql, params = []) => ({
@@ -71,7 +71,7 @@ test("register, test notification, list, and unregister", async () => {
   const reg = await api("/api/devices", { method: "POST", headers: admin,
     body: JSON.stringify({ token: TOKEN, environment: "sandbox", deviceName: "Test iPhone", settings: { digest: true } }) });
   assert.equal(reg.status, 201);
-  assert.deepEqual((await reg.json()).settings, { buy: true, auctions: true, digest: true });
+  assert.deepEqual((await reg.json()).settings, { buy: true, auctions: true, watch: true, digest: true });
 
   const sent = await api("/api/devices/test", { method: "POST", headers: admin, body: JSON.stringify({ token: TOKEN }) });
   assert.equal(sent.status, 200);
@@ -142,6 +142,43 @@ test("the 7 PM digest reaches phones that turned it on", async () => {
 
   const again = await sendDailyWatchDigest(env, new Date("2026-11-13T04:00:00Z"));
   assert.equal(again.sent, 0, "once a day");
+});
+
+test("new WATCH deals are pushed once to phones that want them, old ones never", async () => {
+  const WANTS = "d4".repeat(32);
+  const OPTED_OUT = "e5".repeat(32);
+  db.exec("DELETE FROM push_devices");
+  // A phone registered before the WATCH setting existed gets WATCH alerts.
+  await api("/api/devices", { method: "POST", headers: admin, body: JSON.stringify({ token: WANTS, settings: { buy: true } }) });
+  await api("/api/devices", { method: "POST", headers: admin, body: JSON.stringify({ token: OPTED_OUT, settings: { watch: false } }) });
+  db.prepare(`INSERT INTO listings (id, ebay_item_id, title, item_url, category, recommendation, deal_type,
+      total_buy_cost, estimated_profit, first_seen_at) VALUES
+      (90, 'v1|90|0', 'Nikon Coolpix P90 no charger', 'https://www.ebay.com/itm/90', 'Cameras', 'WATCH', 'repair', 40.26, 60.5, datetime('now')),
+      (91, 'v1|91|0', 'Old WATCH from last week', 'https://www.ebay.com/itm/91', 'Cameras', 'WATCH', 'repair', 30, 20, datetime('now', '-7 days'))`).run();
+
+  apns.length = 0;
+  await sendWatchAlerts(env);
+  assert.ok(!apns.some((call) => call.body.dealId === 91), "a week-old WATCH is never pushed");
+  assert.ok(!apns.some((call) => call.url.endsWith(OPTED_OUT)), "a phone with WATCH alerts off gets none");
+  const p90 = apns.filter((call) => call.body.dealId === 90);
+  assert.equal(p90.length, 1);
+  assert.equal(p90[0].url, `https://api.push.apple.com/3/device/${WANTS}`);
+  assert.equal(p90[0].body.aps.alert.title, "WATCH: Nikon Coolpix P90 no charger");
+  assert.equal(p90[0].body.aps.alert.body, "$40.26 all-in · est. $60.50 profit · check it before buying");
+
+  const again = await sendWatchAlerts(env);
+  assert.equal(again.deals, 0, "each WATCH notifies once");
+});
+
+test("a WATCH auction only says 'bid up to' when there is room", () => {
+  const room = dealNotification({ id: 6, title: "3DS XL", deal_type: "auction", recommendation: "WATCH",
+    suggested_offer: 30, price: 12, estimated_profit: 22 });
+  assert.equal(room.kind, "watch");
+  assert.equal(room.message.title, "Auction WATCH: 3DS XL");
+  assert.equal(room.message.body, "Bid up to $30.00 (now $12.00) · est. $22.00 profit · check it before buying");
+  const noRoom = dealNotification({ id: 7, title: "3DS XL", deal_type: "auction", recommendation: "WATCH",
+    suggested_offer: 10, price: 12, estimated_profit: 16 });
+  assert.equal(noRoom.message.body, "Now $12.00 · est. $16.00 profit · check it before buying");
 });
 
 test("auction deals say how much to bid", () => {

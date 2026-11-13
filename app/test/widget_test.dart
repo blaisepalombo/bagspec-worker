@@ -112,6 +112,12 @@ void main() {
     final body = jsonDecode(log.last.body) as Map<String, dynamic>;
     expect(body['environment'], 'production');
     expect(body['token'], 'ab' * 32);
+    expect(body['settings']['watch'], isTrue, reason: 'WATCH alerts are on by default');
+  });
+
+  test('older saved settings without WATCH turn it on', () {
+    expect(AlertSettings.fromJson({'buy': true, 'auctions': false}).watch, isTrue);
+    expect(AlertSettings.fromJson({'watch': false}).watch, isFalse);
   });
 
   test('a wrong password is reported as unauthorized', () async {
