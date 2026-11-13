@@ -158,7 +158,9 @@ class DealCard extends StatelessWidget {
                         if (deal.category != null) deal.category!,
                         deal.isAuction && deal.suggestedOffer != null
                             ? 'bid up to ${money(deal.suggestedOffer)}'
-                            : '${money(deal.totalBuyCost)} all-in',
+                            : deal.offerNeeded && deal.suggestedOffer != null
+                                ? 'offer up to ${money(deal.suggestedOffer)}'
+                                : '${money(deal.totalBuyCost)} all-in',
                       ].join(' · '),
                       style: const TextStyle(color: BagSpecColors.muted, fontSize: 13),
                     ),

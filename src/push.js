@@ -156,9 +156,12 @@ export function dealNotification(listing) {
   const auction = listing.deal_type === "auction";
   const watch = listing.recommendation === "WATCH";
   const canBid = Number(listing.suggested_offer) > Number(listing.price || 0);
+  const offer = !auction && Number(listing.offer_needed) === 1;
   const price = auction
     ? (canBid ? `Bid up to ${money(listing.suggested_offer)} (now ${money(listing.price)})` : `Now ${money(listing.price)}`)
-    : `${money(listing.total_buy_cost)} all-in`;
+    : offer
+      ? `Offer up to ${money(listing.suggested_offer)} (asks ${money(listing.price)})`
+      : `${money(listing.total_buy_cost)} all-in`;
   const label = `${auction ? "Auction " : ""}${watch ? "WATCH" : "BUY"}`;
   return {
     kind: watch ? "watch" : auction ? "auctions" : "buy",

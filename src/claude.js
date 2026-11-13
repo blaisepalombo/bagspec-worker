@@ -65,6 +65,8 @@ You get one listing, the comparable listings BagSpec found, and BagSpec's profit
 
 If the listing is an auction, its price is only the current bid and will rise. Judge profit at the current bid as usual; BagSpec separately tells the owner a maximum bid (auction.maxBid). Mention in reason if many bids or little time left make winning at that maximum unlikely.
 
+If bestOffer is set, the listing asks more than the owner's budget but accepts offers. The buy cost given is what the owner would pay if the seller accepts an offer up to bestOffer.maxOffer (the asking price is bestOffer.askingPrice). Judge profit at the buy cost given, and mention in reason if the offer looks unlikely to be accepted.
+
 Answer "buy" only when the comparables match, there are no authenticity red flags, and estimatedProfitAfterFees is at least the minimum profit given. Otherwise answer "pass". Do not invent facts that are not in the listing. Write reason in one or two plain sentences.`;
 
 export function createClaudeClient(env) {
@@ -168,6 +170,7 @@ function buildUserMessage(context, minimumProfit) {
       soldPriceReference: context.soldPriceReference || null,
     },
     auction: context.auction || null,
+    bestOffer: context.bestOffer || null,
     minimumProfit,
   });
 }

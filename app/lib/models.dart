@@ -26,6 +26,7 @@ class Deal {
     this.estimatedProfit,
     this.roiPercent,
     this.suggestedOffer,
+    this.offerNeeded = false,
     this.likelyIssue,
     this.partsCost,
     this.resaleLocal,
@@ -52,6 +53,8 @@ class Deal {
   final double? estimatedProfit;
   final double? roiPercent;
   final double? suggestedOffer;
+  // True when the deal needs the seller to accept a Best Offer.
+  final bool offerNeeded;
   final String? likelyIssue;
   final double? partsCost;
   final double? resaleLocal;
@@ -91,6 +94,7 @@ class Deal {
       estimatedProfit: _num(json['estimated_profit']),
       roiPercent: _num(json['roi_percent']),
       suggestedOffer: _num(json['suggested_offer']),
+      offerNeeded: _num(json['offer_needed']) == 1,
       likelyIssue: json['likely_issue'] as String?,
       partsCost: _num(json['estimated_parts_cost']),
       resaleLocal: _num(json['estimated_resale_local']),
