@@ -10,23 +10,34 @@ const APNS_HOSTS = {
   production: "https://api.push.apple.com",
   sandbox: "https://api.sandbox.push.apple.com",
 };
-const DEFAULT_SETTINGS = { buy: true, auctions: true, digest: false };
+// WATCH alerts are on unless a phone turns them off; phones that registered
+// before the setting existed get them too.
+const DEFAULT_SETTINGS = { buy: true, auctions: true, watch: true, digest: false };
 
 let tablesReady = null;
 export function ensurePushTables(env) {
   if (!tablesReady) {
-    tablesReady = env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS push_devices (
-        token TEXT PRIMARY KEY,
-        environment TEXT NOT NULL DEFAULT 'production',
-        settings TEXT NOT NULL DEFAULT '{}',
-        device_name TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        last_push_at TEXT,
-        last_error TEXT
-      )
-    `).run().catch((error) => {
+    tablesReady = env.DB.batch([
+      env.DB.prepare(`
+        CREATE TABLE IF NOT EXISTS push_devices (
+          token TEXT PRIMARY KEY,
+          environment TEXT NOT NULL DEFAULT 'production',
+          settings TEXT NOT NULL DEFAULT '{}',
+          device_name TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          last_push_at TEXT,
+          last_error TEXT
+        )
+      `),
+      // WATCH deals already pushed, so each one notifies once.
+      env.DB.prepare(`
+        CREATE TABLE IF NOT EXISTS watch_pushes (
+          listing_id INTEGER PRIMARY KEY,
+          sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+      `),
+    ]).catch((error) => {
       tablesReady = null;
       throw error;
     });
@@ -143,17 +154,47 @@ const money = (value) => `$${Number(value || 0).toFixed(2)}`;
 
 export function dealNotification(listing) {
   const auction = listing.deal_type === "auction";
-  const body = auction
-    ? `Bid up to ${money(listing.suggested_offer)} (now ${money(listing.price)}) · est. ${money(listing.estimated_profit)} profit`
-    : `${money(listing.total_buy_cost)} all-in · est. ${money(listing.estimated_profit)} profit`;
+  const watch = listing.recommendation === "WATCH";
+  const canBid = Number(listing.suggested_offer) > Number(listing.price || 0);
+  const price = auction
+    ? (canBid ? `Bid up to ${money(listing.suggested_offer)} (now ${money(listing.price)})` : `Now ${money(listing.price)}`)
+    : `${money(listing.total_buy_cost)} all-in`;
+  const label = `${auction ? "Auction " : ""}${watch ? "WATCH" : "BUY"}`;
   return {
-    kind: auction ? "auctions" : "buy",
+    kind: watch ? "watch" : auction ? "auctions" : "buy",
     message: {
-      title: `${auction ? "Auction BUY" : "BUY"}: ${String(listing.title || "").slice(0, 90)}`,
-      body,
+      title: `${label}: ${String(listing.title || "").slice(0, 90)}`,
+      body: `${price} · est. ${money(listing.estimated_profit)} profit${watch ? " · check it before buying" : ""}`,
       data: { dealId: listing.id, url: listing.item_url || null },
     },
   };
+}
+
+// WATCH deals (good numbers, something unconfirmed) go to phones that want
+// them, once each. Only recent ones, so the first run doesn't send old ones.
+export async function sendWatchAlerts(env, limit = 5) {
+  if (!pushConfigured(env)) return { status: "Push not configured", sent: 0 };
+  await ensurePushTables(env);
+  const { results } = await env.DB.prepare(`
+    SELECT * FROM listings l
+    WHERE l.recommendation = 'WATCH'
+      AND l.first_seen_at >= datetime('now', '-12 hours')
+      AND (l.item_end_date IS NULL OR julianday(l.item_end_date) > julianday('now'))
+      AND NOT EXISTS (SELECT 1 FROM watch_pushes w WHERE w.listing_id = l.id)
+    ORDER BY l.id DESC
+    LIMIT ?
+  `).bind(limit).all();
+
+  let sent = 0;
+  for (const listing of results) {
+    const { kind, message } = dealNotification(listing);
+    const push = await notifyDevices(env, kind, message);
+    // Recorded even when no phone wants WATCH alerts, so it isn't retried.
+    await env.DB.prepare("INSERT OR IGNORE INTO watch_pushes (listing_id) VALUES (?)")
+      .bind(listing.id).run();
+    sent += push.sent;
+  }
+  return { status: "WATCH alerts checked", deals: results.length, sent };
 }
 
 const TOKEN_PATTERN = /^[0-9a-f]{64,200}$/i;

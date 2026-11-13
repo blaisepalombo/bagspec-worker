@@ -7,7 +7,7 @@ import {
   startEbayConnect,
 } from "./ebay-account.js";
 import { maybePruneOldData } from "./maintenance.js";
-import { dealNotification, handleDeviceRequest, notifyDevices, pushConfigured } from "./push.js";
+import { dealNotification, handleDeviceRequest, notifyDevices, pushConfigured, sendWatchAlerts } from "./push.js";
 import {
   CLAUDE_MODEL,
   CLAUDE_SCREEN_MODEL,
@@ -2026,6 +2026,7 @@ async function runAutomatedCycle(env) {
     ["enrichment", () => enrichCandidates(env, 7)],
     ["analysis", () => analyzeCandidateBatch(env, 6)],
     ["alerts", () => sendPendingDealAlerts(env, 5)],
+    ["watchAlerts", () => sendWatchAlerts(env, 5)],
     ["digest", () => sendDailyWatchDigest(env)],
   ];
 

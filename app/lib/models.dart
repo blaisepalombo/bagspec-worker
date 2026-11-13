@@ -273,19 +273,24 @@ class EbayStatus {
 }
 
 class AlertSettings {
-  const AlertSettings({this.buy = true, this.auctions = true, this.digest = false});
+  const AlertSettings({this.buy = true, this.auctions = true, this.watch = true, this.digest = false});
   final bool buy;
   final bool auctions;
+  final bool watch;
   final bool digest;
 
-  AlertSettings copyWith({bool? buy, bool? auctions, bool? digest}) =>
-      AlertSettings(buy: buy ?? this.buy, auctions: auctions ?? this.auctions, digest: digest ?? this.digest);
+  AlertSettings copyWith({bool? buy, bool? auctions, bool? watch, bool? digest}) => AlertSettings(
+      buy: buy ?? this.buy,
+      auctions: auctions ?? this.auctions,
+      watch: watch ?? this.watch,
+      digest: digest ?? this.digest);
 
-  Map<String, dynamic> toJson() => {'buy': buy, 'auctions': auctions, 'digest': digest};
+  Map<String, dynamic> toJson() => {'buy': buy, 'auctions': auctions, 'watch': watch, 'digest': digest};
 
   factory AlertSettings.fromJson(Map<String, dynamic> json) => AlertSettings(
         buy: json['buy'] != false,
         auctions: json['auctions'] != false,
+        watch: json['watch'] != false,
         digest: json['digest'] == true,
       );
 }
