@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runBalancedBatch } from "../src/index.js";
+import { loadAnalysisQueue, runBalancedBatch, takeFromAnalysisQueue } from "../src/index.js";
 
 // A fake queue that behaves like analyzeNextCandidate: best listing first,
 // skipping excluded categories.
@@ -42,4 +42,30 @@ test("an analysis error ends the batch and is reported", async () => {
   assert.equal(results.length, 1);
   assert.equal(results[0].status, "Analysis failed");
   assert.equal(reported, "AI down");
+});
+
+test("the analysis queue is taken best first, one category at a time", () => {
+  const queue = [
+    { id: 1, category: "Cameras" },
+    { id: 2, category: "Cameras" },
+    { id: 3, category: "Headphones" },
+  ];
+  const first = takeFromAnalysisQueue(queue, []);
+  assert.ok(first, "a listing is picked");
+  assert.equal(queue.length, 2, "a picked listing leaves the queue");
+  const second = takeFromAnalysisQueue(queue, [first.category]);
+  assert.notEqual(second.category, first.category, "another category goes next");
+  const third = takeFromAnalysisQueue(queue, ["Cameras", "Headphones"]);
+  assert.ok(third, "falls back to any category when all are excluded");
+  assert.equal(takeFromAnalysisQueue(queue, []), null, "an empty queue gives nothing");
+});
+
+test("the queue is read once, with ids and categories only", async () => {
+  const sqls = [];
+  const env = { DB: { prepare: (sql) => ({ all: async () => { sqls.push(sql); return { results: [{ id: 7, category: "Cameras" }] }; } }) } };
+  const queue = await loadAnalysisQueue(env);
+  assert.deepEqual(queue, [{ id: 7, category: "Cameras" }]);
+  assert.equal(sqls.length, 1);
+  assert.match(sqls[0], /SELECT id, category\s+FROM listings/);
+  assert.doesNotMatch(sqls[0], /SELECT \*/);
 });
