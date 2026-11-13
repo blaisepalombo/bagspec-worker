@@ -404,6 +404,14 @@ export async function maybeSyncEbayPurchases(env) {
   return syncEbayPurchases(env);
 }
 
+// The buyer's order details page (needs the owner's eBay sign-in). The old
+// listing page is useless once an auction ends: eBay shows similar items.
+export function orderDetailsUrl(orderLineId) {
+  const match = String(orderLineId || "").match(/^(\d+)-(\d+)$/);
+  if (!match || /^0+$/.test(match[2])) return "https://www.ebay.com/mye/myebay/purchase";
+  return `https://order.ebay.com/ord/show?itemid=${match[1]}&transid=${match[2]}`;
+}
+
 // ---- Dashboard API (owner only; the caller checks the login) ------------
 
 export async function handleEbayAccountRequest(request, env, url) {
@@ -421,6 +429,12 @@ export async function handleEbayAccountRequest(request, env, url) {
         ORDER BY purchased_at DESC
         LIMIT 50
       `).all();
+      const { results: imported } = await env.DB.prepare(
+        "SELECT inventory_id, order_line_id FROM ebay_purchases WHERE inventory_id IS NOT NULL"
+      ).all();
+      const orderLinks = Object.fromEntries(
+        imported.map((row) => [row.inventory_id, orderDetailsUrl(row.order_line_id)])
+      );
       return Response.json({
         connected: Boolean(account?.refresh_token),
         configured: Boolean(String(env.EBAY_RUNAME || "").trim()),
@@ -428,7 +442,8 @@ export async function handleEbayAccountRequest(request, env, url) {
         lastSyncAt: account?.last_sync_at || null,
         lastSyncError: account?.last_sync_error || null,
         needsReconnect: Boolean(account?.refresh_token && account.needs_reconnect),
-        otherPurchases,
+        otherPurchases: otherPurchases.map((p) => ({ ...p, order_url: orderDetailsUrl(p.order_line_id) })),
+        orderLinks,
       });
     }
 
