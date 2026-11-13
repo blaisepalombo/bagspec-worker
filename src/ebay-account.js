@@ -91,11 +91,16 @@ export async function sealToken(env, token) {
 }
 
 export async function openToken(env, value) {
-  const [iv, sealed] = String(value || "").split(".");
-  const plain = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: fromBase64(iv) }, await tokenKey(env), fromBase64(sealed)
-  );
-  return new TextDecoder().decode(plain);
+  const key = await tokenKey(env);
+  try {
+    const [iv, sealed] = String(value || "").split(".");
+    const plain = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: fromBase64(iv) }, key, fromBase64(sealed)
+    );
+    return new TextDecoder().decode(plain);
+  } catch {
+    throw new Error("The saved eBay sign-in can't be read (a secret may have changed). Connect eBay again.");
+  }
 }
 
 // ---- OAuth --------------------------------------------------------------
@@ -271,7 +276,7 @@ function wonListRequest(page) {
 </GetMyeBayBuyingRequest>`;
 }
 
-async function fetchWonPurchases(accessToken) {
+export async function fetchWonPurchases(accessToken) {
   const purchases = [];
   for (let page = 1; page <= MAX_PAGES; page++) {
     const response = await fetch(TRADING_URL, {
