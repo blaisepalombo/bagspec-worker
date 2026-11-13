@@ -48,5 +48,18 @@ flutter analyze lib test
 flutter test
 ```
 
+### Preview in Chrome (phone view)
+
+```bash
+cd app
+flutter build web --dart-define=BAGSPEC_API=
+node tool/preview.mjs                        # real data from bagspec.com
+node tool/preview.mjs http://127.0.0.1:8787  # or a local `wrangler dev`
+```
+
+Open http://localhost:8790, press F12, and turn on the device toolbar
+(Ctrl+Shift+M) for an iPhone-sized view. The preview server forwards API
+calls to the Worker from the same origin, so the browser needs no CORS.
+
 Push only works on a real iPhone. Debug builds register as `sandbox`, and
 TestFlight builds as `production`.

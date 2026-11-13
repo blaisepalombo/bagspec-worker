@@ -19,8 +19,17 @@ class BagSpecApi {
   BagSpecApi({
     required this.password,
     http.Client? client,
-    this.baseUrl = 'https://bagspec.com',
-  }) : _client = client ?? http.Client();
+    String? baseUrl,
+  })  : baseUrl = baseUrl ?? _defaultBaseUrl(),
+        _client = client ?? http.Client();
+
+  /// The iPhone app talks to bagspec.com. The browser preview is built with
+  /// `--dart-define=BAGSPEC_API=` (empty) and calls the page's own origin,
+  /// where tool/preview.mjs forwards requests to the Worker.
+  static String _defaultBaseUrl() {
+    const configured = String.fromEnvironment('BAGSPEC_API', defaultValue: 'https://bagspec.com');
+    return configured.isEmpty ? Uri.base.origin : configured;
+  }
 
   final String password;
   final String baseUrl;

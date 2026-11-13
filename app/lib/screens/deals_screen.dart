@@ -206,7 +206,11 @@ class DealImage extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(6),
       child: safe
-          ? Image.network(url!, width: size, height: size, fit: BoxFit.cover, errorBuilder: (_, _, _) => placeholder)
+          ? Image.network(url!, width: size, height: size, fit: BoxFit.cover,
+              // In the browser preview eBay's images lack CORS headers, so
+              // fall back to a plain <img>. No effect on iPhone.
+              webHtmlElementStrategy: WebHtmlElementStrategy.fallback,
+              errorBuilder: (_, _, _) => placeholder)
           : placeholder,
     );
   }

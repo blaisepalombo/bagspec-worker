@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
@@ -49,6 +50,10 @@ class SettingsScreenState extends State<SettingsScreen> {
 
   /// Asks iOS for a push token and tells BagSpec where to send alerts.
   Future<void> register() async {
+    if (kIsWeb) {
+      setState(() => _status = 'Browser preview: push notifications only work in the iPhone app.');
+      return;
+    }
     setState(() => _busy = true);
     try {
       final token = await widget.push.requestToken();
