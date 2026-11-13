@@ -584,7 +584,7 @@ const LOCAL_PREFERENCE_DOLLARS = 10;
 // uncertainty belongs in the repair pipeline instead.
 const FLIP_LISTINGS_PER_SEARCH = 15;
 const FLIP_FAULT_PATTERN =
-  /\b(?:for parts|parts only|not working|broken|cracked|damaged|untested|not tested|unable to test|as[- ]is|read description|no power|won't|doesn't work|does not work|faulty|defective|locked|issues?|problems?)\b/;
+  /\b(?:for parts|parts only|not working|broken|cracked|damaged|untested|not tested|unable to test|as[- ]is|read description|no power|won't|doesn't work|does not work|doesn't hold|does not hold|bad battery|faulty|defective|locked|issues?|problems?)\b/;
 // Descriptions often carry boilerplate such as "sold as is" or "not
 // responsible for shipping damage", so they are checked for clear faults only.
 const FLIP_DESCRIPTION_FAULT_PATTERN =
@@ -1263,7 +1263,7 @@ export function getCategoryRejectReason(title, category) {
 
 // screeningCost is the lowest cost the listing can really have; it differs
 // from totalBuyCost when the search result had no shipping quote.
-function classifyTitle(
+export function classifyTitle(
   title,
   totalBuyCost,
   category,
@@ -1362,13 +1362,14 @@ function classifyTitle(
   }
 
   if (dealType === "flip") {
+    // A "Used" listing that states a fault ("battery doesn't hold a
+    // charge", "broken hinge") is a repair candidate, not a flip. Rejecting
+    // it lost it entirely, since the repair search only looks at "For parts
+    // or not working". The repair rules and AI analysis decide from here.
     if (flipFaultFound(text)) {
       return {
-        status: "rejected",
-        analysisStatus: "filtered",
-        score: 0,
-        recommendation: "PASS",
-        reasoning: "Flip listing mentions a fault or uncertainty",
+        ...classifyTitle(title, totalBuyCost, category, screeningCost, "repair"),
+        dealType: "repair",
       };
     }
 
@@ -1774,7 +1775,7 @@ async function scanListings(env) {
             classification.score,
             classification.recommendation,
             classification.reasoning,
-            dealType,
+            classification.dealType || dealType,
             item.seller?.username || null
           );
         });
@@ -3264,23 +3265,20 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     };
   }
 
-  const isFlip = listing.deal_type === "flip";
+  let isFlip = listing.deal_type === "flip";
   const flipEvidence = [listing.title, savedDetails.conditionDescription]
     .filter(Boolean).join(" ");
   const flipDescription = [savedDetails.shortDescription, savedDetails.fullDescription]
     .filter(Boolean).join(" ").replace(/<[^>]*>/g, " ");
   if (isFlip && (flipFaultFound(flipEvidence) ||
       flipFaultFound(flipDescription, FLIP_DESCRIPTION_FAULT_PATTERN))) {
-    const reason = "Seller's condition notes mention a fault or uncertainty";
-    await env.DB.prepare(`
-      UPDATE listings SET status = 'rejected', analysis_status = 'filtered',
-        deal_score = 0, recommendation = 'PASS', reasoning = ? WHERE id = ?
-    `).bind(reason, listing.id).run();
-    return {
-      status: "Listing rejected before analysis",
-      listing: { title: listing.title, link: listing.item_url, category: listing.category },
-      reason,
-    };
+    // The seller's notes reveal a fault, so analyze it as a repair (with a
+    // repair estimate and risk) instead of throwing it away.
+    await env.DB.prepare(
+      "UPDATE listings SET deal_type = 'repair' WHERE id = ?"
+    ).bind(listing.id).run();
+    listing.deal_type = "repair";
+    isFlip = false;
   }
 
   const listingData = {
