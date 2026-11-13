@@ -2019,8 +2019,11 @@ async function runAutomatedCycle(env) {
 
   const stages = [
     ["scan", () => scanListings(env)],
-    ["enrichment", () => enrichCandidates(env, 6)],
-    ["analysis", () => analyzeCandidateBatch(env, 4)],
+    // Each enrichment is one eBay call and each analysis about three
+    // (AI screen, comparables, sometimes a retry), which keeps a cycle well
+    // under Cloudflare's per-invocation subrequest limit.
+    ["enrichment", () => enrichCandidates(env, 7)],
+    ["analysis", () => analyzeCandidateBatch(env, 6)],
     ["alerts", () => sendPendingDealAlerts(env, 5)],
     ["digest", () => sendDailyWatchDigest(env)],
   ];
@@ -2081,41 +2084,51 @@ async function runAutomatedCycle(env) {
   return result;
 }
 
-async function analyzeCandidateBatch(env, limit = 3) {
-  const safeLimit = Math.min(
-    Math.max(Number(limit) || 3, 1),
-    5
-  );
+const NOTHING_TO_ANALYZE = "No enriched candidates are waiting for analysis";
+
+// Runs up to `limit` analyses. First one listing per category so no
+// category starves, then fills the rest of the batch with the best listings
+// left from any category. Stopping after one per category left cameras and
+// consoles, most of the queue, to expire unanalyzed (110-420 listings a day).
+export async function runBalancedBatch(limit, analyzeNext, onError = () => {}) {
   const results = [];
   const usedCategories = [];
+  let oneEach = true;
 
-  for (let index = 0; index < safeLimit; index += 1) {
+  while (results.length < limit) {
     let result;
-
     try {
-      result = await analyzeNextCandidate(env, usedCategories);
+      result = await analyzeNext(oneEach ? usedCategories : []);
     } catch (error) {
-      await handleAnalysisError(env, error);
-      results.push({
-        status: "Analysis failed",
-        details: error.message,
-      });
+      await onError(error);
+      results.push({ status: "Analysis failed", details: error.message });
       break;
     }
 
-    if (
-      result.status ===
-      "No enriched candidates are waiting for analysis"
-    ) {
+    if (result.status === NOTHING_TO_ANALYZE) {
+      if (oneEach && usedCategories.length > 0) {
+        oneEach = false;
+        continue;
+      }
       break;
     }
 
     results.push(result);
-
-    if (result.listing?.category) {
-      usedCategories.push(result.listing.category);
-    }
+    if (result.listing?.category) usedCategories.push(result.listing.category);
   }
+  return results;
+}
+
+async function analyzeCandidateBatch(env, limit = 3) {
+  const safeLimit = Math.min(
+    Math.max(Number(limit) || 3, 1),
+    8
+  );
+  const results = await runBalancedBatch(
+    safeLimit,
+    (excludedCategories) => analyzeNextCandidate(env, excludedCategories),
+    (error) => handleAnalysisError(env, error)
+  );
 
   return {
     status: "Analysis batch completed",
