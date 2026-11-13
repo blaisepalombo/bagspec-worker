@@ -7,6 +7,7 @@ import {
   finishEbayConnect,
   handleEbayAccountRequest,
   openToken,
+  orderDetailsUrl,
   parseWonList,
   sealToken,
   startEbayConnect,
@@ -190,6 +191,9 @@ test("connect, import, dedupe, add and hide", async () => {
   const status = await (await worker.fetch(new Request("https://bagspec.com/api/ebay/status", { headers: admin }), env)).json();
   assert.equal(status.connected, true);
   assert.deepEqual(status.otherPurchases.map((p) => p.title), ["Phone case (personal)"]);
+  // Purchases link to the eBay order page, not the ended listing.
+  assert.equal(status.otherPurchases[0].order_url, "https://order.ebay.com/ord/show?itemid=999&transid=2002");
+  assert.equal(status.orderLinks[camera.id], "https://order.ebay.com/ord/show?itemid=128175992473&transid=1001");
 
   // A second sync (forcing a token refresh) adds nothing new.
   db.prepare("UPDATE ebay_account SET access_expires_at = '2000-01-01T00:00:00Z'").run();
@@ -270,4 +274,11 @@ test("a broken eBay sign-in asks for Connect eBay again and pauses the hourly sy
   now = await status();
   assert.equal(now.needsReconnect, false);
   assert.ok(now.lastSyncError);
+});
+
+test("orderDetailsUrl falls back to purchase history when eBay gives no transaction", () => {
+  assert.equal(orderDetailsUrl("128175992473-10085495116123"), "https://order.ebay.com/ord/show?itemid=128175992473&transid=10085495116123");
+  assert.equal(orderDetailsUrl("128175992473-0"), "https://www.ebay.com/mye/myebay/purchase");
+  assert.equal(orderDetailsUrl("12-34-56"), "https://www.ebay.com/mye/myebay/purchase");
+  assert.equal(orderDetailsUrl(null), "https://www.ebay.com/mye/myebay/purchase");
 });
