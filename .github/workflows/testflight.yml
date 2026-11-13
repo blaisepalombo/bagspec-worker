@@ -1,0 +1,189 @@
+name: TestFlight beta
+
+# Builds the BagSpec iPhone app (app/) on a GitHub Mac and uploads it to
+# TestFlight. Start it by hand: Actions > TestFlight beta > Run workflow.
+# This repository is public, so GitHub's Mac runners cost nothing here.
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: >-
+          Mac to build on. Apple silicon is about twice as fast; if the job sits
+          in "Queued" for more than a few minutes, cancel and pick Intel.
+        type: choice
+        default: macos-26
+        options:
+          - macos-26
+          - macos-26-intel
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testflight-beta
+  cancel-in-progress: false
+
+jobs:
+  build-and-upload:
+    name: Build and upload iPhone beta
+    runs-on: ${{ inputs.runner || 'macos-26' }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: app
+    env:
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+      IOS_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+      IOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+      IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+      # The app's numeric Apple ID in App Store Connect (not a secret). Set it
+      # as a repository variable once the app record exists.
+      APP_STORE_APP_ID: ${{ vars.APP_STORE_APP_ID }}
+
+    steps:
+      - name: Check out BagSpec
+        uses: actions/checkout@v5
+
+      - name: Verify required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            APP_STORE_CONNECT_ISSUER_ID
+            APP_STORE_CONNECT_KEY_ID
+            APP_STORE_CONNECT_PRIVATE_KEY
+            IOS_DISTRIBUTION_CERTIFICATE_BASE64
+            IOS_DISTRIBUTION_CERTIFICATE_PASSWORD
+            IOS_PROVISIONING_PROFILE_BASE64
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing required GitHub secret: $name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.2
+          channel: stable
+          cache: true
+
+      - name: Install app packages
+        run: flutter pub get
+
+      - name: Install Apple signing materials
+        shell: bash
+        run: |
+          set -euo pipefail
+          CERTIFICATE_PATH="$RUNNER_TEMP/bagspec-distribution.p12"
+          PROFILE_PATH="$RUNNER_TEMP/bagspec.mobileprovision"
+          PROFILE_PLIST="$RUNNER_TEMP/bagspec-profile.plist"
+          KEYCHAIN_PATH="$RUNNER_TEMP/bagspec-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+
+          printf '%s' "$IOS_DISTRIBUTION_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          printf '%s' "$IOS_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$IOS_DISTRIBUTION_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
+          PROFILE_UUID="$(/usr/libexec/PlistBuddy -c 'Print UUID' "$PROFILE_PLIST")"
+          PROFILE_APP_ID="$(/usr/libexec/PlistBuddy -c 'Print Entitlements:application-identifier' "$PROFILE_PLIST")"
+          if [[ "$PROFILE_APP_ID" != 'AG4SK353YX.com.bagspec.app' ]]; then
+            echo "Provisioning profile is for unexpected app: $PROFILE_APP_ID" >&2
+            exit 1
+          fi
+          PROFILE_APS="$(/usr/libexec/PlistBuddy -c 'Print Entitlements:aps-environment' "$PROFILE_PLIST" 2>/dev/null || true)"
+          if [[ "$PROFILE_APS" != 'production' ]]; then
+            echo "The provisioning profile has no Push Notifications entitlement (aps-environment=$PROFILE_APS)." >&2
+            echo "Turn on Push Notifications for com.bagspec.app, then regenerate the profile." >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Install App Store Connect upload key
+        shell: bash
+        run: |
+          set -euo pipefail
+          PRIVATE_KEYS_DIR="$HOME/.appstoreconnect/private_keys"
+          mkdir -p "$PRIVATE_KEYS_DIR"
+          printf '%s' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$PRIVATE_KEYS_DIR/AuthKey_$APP_STORE_CONNECT_KEY_ID.p8"
+          chmod 600 "$PRIVATE_KEYS_DIR/AuthKey_$APP_STORE_CONNECT_KEY_ID.p8"
+
+      - name: Check app code
+        run: flutter analyze lib test
+
+      - name: Run automated tests
+        run: flutter test
+
+      - name: Pick the build number
+        shell: bash
+        run: |
+          # One past the newest TestFlight build when that's higher than this
+          # run's number. Falls back to the run number if the lookup fails.
+          BUILD_NUMBER="$GITHUB_RUN_NUMBER"
+          if [[ -n "${APP_STORE_APP_ID:-}" ]]; then
+            LATEST="$(pipx run --spec codemagic-cli-tools app-store-connect \
+              get-latest-testflight-build-number "$APP_STORE_APP_ID" \
+              --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
+              --key-id "$APP_STORE_CONNECT_KEY_ID" \
+              --private-key @env:APP_STORE_CONNECT_PRIVATE_KEY 2>/dev/null | tail -n 1 || true)"
+            if [[ "$LATEST" =~ ^[0-9]+$ ]] && (( LATEST + 1 > BUILD_NUMBER )); then
+              BUILD_NUMBER=$((LATEST + 1))
+            fi
+          fi
+          echo "Build number: $BUILD_NUMBER"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+
+      - name: Build signed IPA
+        run: |
+          flutter build ipa \
+            --release \
+            --build-number="$BUILD_NUMBER" \
+            --export-options-plist=ios/ExportOptions.plist
+
+      - name: Upload to App Store Connect
+        shell: bash
+        run: |
+          set -euo pipefail
+          IPA_PATH="$(find build/ios/ipa -maxdepth 1 -name '*.ipa' -print -quit)"
+          if [[ -z "$IPA_PATH" ]]; then
+            echo 'Signed IPA was not found.' >&2
+            exit 1
+          fi
+          xcrun altool \
+            --upload-app \
+            --type ios \
+            --file "$IPA_PATH" \
+            --apiKey "$APP_STORE_CONNECT_KEY_ID" \
+            --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
+
+      - name: Remove temporary signing materials
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$HOME/.appstoreconnect/private_keys/AuthKey_$APP_STORE_CONNECT_KEY_ID.p8"
+          if [[ -n "${PROFILE_UUID:-}" ]]; then
+            rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          fi
+          if [[ -n "${KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi

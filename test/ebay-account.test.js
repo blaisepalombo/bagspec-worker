@@ -282,3 +282,15 @@ test("orderDetailsUrl falls back to purchase history when eBay gives no transact
   assert.equal(orderDetailsUrl("12-34-56"), "https://www.ebay.com/mye/myebay/purchase");
   assert.equal(orderDetailsUrl(null), "https://www.ebay.com/mye/myebay/purchase");
 });
+
+test("the iPhone app gets the eBay consent link with its login header", async () => {
+  const anonymous = await worker.fetch(new Request("https://bagspec.com/api/ebay/connect", { method: "POST" }), env);
+  assert.equal(anonymous.status, 401);
+  const response = await worker.fetch(new Request("https://bagspec.com/api/ebay/connect", { method: "POST", headers: admin }), env);
+  assert.equal(response.status, 200);
+  const consent = new URL((await response.json()).url);
+  assert.equal(consent.origin + consent.pathname, "https://auth.ebay.com/oauth2/authorize");
+  const state = consent.searchParams.get("state");
+  assert.equal(db.prepare("SELECT oauth_state FROM ebay_account WHERE id = 1").get().oauth_state, state,
+    "the callback will accept this link's state");
+});

@@ -7,6 +7,7 @@ import {
   startEbayConnect,
 } from "./ebay-account.js";
 import { maybePruneOldData } from "./maintenance.js";
+import { dealNotification, handleDeviceRequest, notifyDevices, pushConfigured } from "./push.js";
 import {
   CLAUDE_MODEL,
   CLAUDE_SCREEN_MODEL,
@@ -56,6 +57,14 @@ export default {
         });
       }
       return handleInventoryRequest(request, env, url);
+    }
+
+    // iPhone app push registrations and test notifications. Owner only.
+    if (url.pathname === "/api/devices" || url.pathname.startsWith("/api/devices/")) {
+      if (!isAuthorized(request, env)) {
+        return new Response("BagSpec login required", { status: 401 });
+      }
+      return handleDeviceRequest(request, env, url);
     }
 
     // Connected eBay account: status, sync, and imported purchases. Owner only.
@@ -2715,8 +2724,10 @@ export function buildWatchDigestPayload(rows, localDate) {
   };
 }
 
-async function sendDailyWatchDigest(env, now = new Date()) {
-  if (!env.DISCORD_WEBHOOK_URL) return { status: "Discord not configured", sent: 0 };
+export async function sendDailyWatchDigest(env, now = new Date()) {
+  if (!env.DISCORD_WEBHOOK_URL && !pushConfigured(env)) {
+    return { status: "No alert channel configured", sent: 0 };
+  }
   const clock = getLocalDigestClock(now);
   if (clock.hour < DIGEST_LOCAL_HOUR) return { status: "Not digest time yet", sent: 0 };
 
@@ -2728,7 +2739,7 @@ async function sendDailyWatchDigest(env, now = new Date()) {
   if (existing) return { status: "Digest already sent today", sent: 0 };
 
   const { results: rows } = await env.DB.prepare(`
-    SELECT title, item_url, category, deal_type, recommendation, total_buy_cost,
+    SELECT id, title, item_url, category, deal_type, recommendation, total_buy_cost,
       estimated_profit, roi_percent, suggested_offer
     FROM listings
     WHERE recommendation IN ('WATCH', 'BUY')
@@ -2739,17 +2750,33 @@ async function sendDailyWatchDigest(env, now = new Date()) {
     LIMIT ?
   `).bind(DIGEST_SIZE).all();
 
-  await postDiscordWebhook(env, buildWatchDigestPayload(rows, clock.date));
+  if (env.DISCORD_WEBHOOK_URL) {
+    await postDiscordWebhook(env, buildWatchDigestPayload(rows, clock.date));
+  }
+  // Phones that turned the digest on get a one-line summary; tapping it
+  // opens the best deal.
+  let push = null;
+  if (pushConfigured(env) && rows.length) {
+    const best = rows[0];
+    push = await notifyDevices(env, "digest", {
+      title: `Today's top ${rows.length} near-deal${rows.length === 1 ? "" : "s"}`,
+      body: `Best: ${String(best.title || "").slice(0, 70)} · est. $${Number(best.estimated_profit || 0).toFixed(2)} profit`,
+      data: { dealId: best.id, url: best.item_url || null },
+    }).catch((error) => {
+      console.error("Digest push failed", error);
+      return null;
+    });
+  }
   await env.DB.prepare(
     "INSERT OR IGNORE INTO system_events (event_key) VALUES (?)"
   ).bind(eventKey).run();
-  return { status: "Digest sent", sent: 1, items: rows.length };
+  return { status: "Digest sent", sent: 1, items: rows.length, pushed: push?.sent ?? 0 };
 }
 
-async function sendPendingDealAlerts(env, limit = 3) {
-  if (!env.DISCORD_WEBHOOK_URL) {
+export async function sendPendingDealAlerts(env, limit = 3) {
+  if (!env.DISCORD_WEBHOOK_URL && !pushConfigured(env)) {
     return {
-      status: "Discord not configured",
+      status: "No alert channel configured (Discord or iPhone push)",
       sent: 0,
     };
   }
@@ -2795,10 +2822,33 @@ async function sendPendingDealAlerts(env, limit = 3) {
         `).bind(rejectReason, listing.id).run();
         continue;
       }
-      await postDiscordWebhook(
-        env,
-        buildDiscordDealPayload(listing)
-      );
+      // Discord and the iPhone app are independent: a deal counts as alerted
+      // once either one delivers it, so one channel failing never repeats
+      // the alert on the other every five minutes.
+      const channels = [];
+      const problems = [];
+      if (env.DISCORD_WEBHOOK_URL) {
+        try {
+          await postDiscordWebhook(env, buildDiscordDealPayload(listing));
+          channels.push("discord");
+        } catch (error) {
+          problems.push(`Discord: ${error.message}`);
+        }
+      }
+      if (pushConfigured(env)) {
+        const { kind, message } = dealNotification(listing);
+        const push = await notifyDevices(env, kind, message).catch((error) => {
+          problems.push(`Push: ${error.message}`);
+          return { sent: 0 };
+        });
+        if (push.sent > 0) channels.push("push");
+        else if (push.failed > 0) problems.push("Push: no device accepted the alert");
+      }
+      // Retry next cycle only when a channel actually failed; a phone that
+      // has this kind of alert turned off is not a failure.
+      if (!channels.length && problems.length) {
+        throw new Error(problems.join("; "));
+      }
 
       await env.DB.prepare(`
         UPDATE listings
@@ -2806,7 +2856,7 @@ async function sendPendingDealAlerts(env, limit = 3) {
         WHERE id = ? AND alerted_at IS NULL
       `).bind(listing.id).run();
 
-      sent.push({ id: listing.id, title: listing.title });
+      sent.push({ id: listing.id, title: listing.title, channels });
     } catch (error) {
       failed.push({
         id: listing.id,
@@ -2817,7 +2867,7 @@ async function sendPendingDealAlerts(env, limit = 3) {
   }
 
   return {
-    status: "Discord alert check completed",
+    status: "Deal alert check completed",
     sent: sent.length,
     failed: failed.length,
     sentItems: sent,
