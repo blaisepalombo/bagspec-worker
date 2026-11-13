@@ -126,6 +126,13 @@ function requireRuName(env) {
 
 // Step 1: send the owner to eBay's consent page.
 export async function startEbayConnect(env) {
+  return Response.redirect(await ebayConnectUrl(env), 302);
+}
+
+// The consent page address with a fresh one-time state. The iPhone app asks
+// for it with POST /api/ebay/connect (its login is a header, which a plain
+// browser link to /ebay/connect can't carry) and opens it in Safari.
+export async function ebayConnectUrl(env) {
   await ensureEbayTables(env);
   const ruName = requireRuName(env);
   const state = toBase64(crypto.getRandomValues(new Uint8Array(24)))
@@ -143,7 +150,7 @@ export async function startEbayConnect(env) {
   consent.searchParams.set("response_type", "code");
   consent.searchParams.set("scope", SCOPE);
   consent.searchParams.set("state", state);
-  return Response.redirect(consent.toString(), 302);
+  return consent.toString();
 }
 
 async function requestToken(env, params) {
@@ -445,6 +452,10 @@ export async function handleEbayAccountRequest(request, env, url) {
         otherPurchases: otherPurchases.map((p) => ({ ...p, order_url: orderDetailsUrl(p.order_line_id) })),
         orderLinks,
       });
+    }
+
+    if (request.method === "POST" && parts[2] === "connect") {
+      return Response.json({ url: await ebayConnectUrl(env) });
     }
 
     if (request.method === "POST" && parts[2] === "sync") {

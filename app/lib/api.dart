@@ -75,6 +75,63 @@ class BagSpecApi {
   Future<Inventory> inventory() async =>
       Inventory.fromJson(await _send('GET', '/api/inventory') as Map<String, dynamic>);
 
+  // ---- My flips --------------------------------------------------------
+
+  /// "I bought this" on a deal, or a manual item when [listingId] is null.
+  /// Leave [salesTax] null to let BagSpec estimate 6%.
+  Future<void> addFlip({
+    int? listingId,
+    String? itemName,
+    required double purchasePrice,
+    double? inboundShipping,
+    double? salesTax,
+    double? partsCost,
+    String? notes,
+  }) =>
+      _send('POST', '/api/inventory', {
+        'listingId': ?listingId,
+        'itemName': ?itemName,
+        'purchasePrice': purchasePrice,
+        'inboundShipping': ?inboundShipping,
+        'salesTax': ?salesTax,
+        'partsCost': ?partsCost,
+        'notes': ?notes,
+      });
+
+  /// Sends only the fields that changed, as the website does.
+  Future<void> updateFlip(int id, Map<String, Object> changes) => _send('POST', '/api/inventory/$id', changes);
+
+  Future<void> markFlipSold(int id, {required double salePrice, required String channel, double? outboundShipping}) =>
+      _send('POST', '/api/inventory/$id', {
+        'status': 'sold',
+        'salePrice': salePrice,
+        'saleChannel': channel,
+        'outboundShipping': ?outboundShipping,
+      });
+
+  Future<void> deleteFlip(int id) => _send('POST', '/api/inventory/$id/delete', const {});
+
+  // ---- Connected eBay account -----------------------------------------
+
+  Future<EbayStatus> ebayStatus() async =>
+      EbayStatus.fromJson(await _send('GET', '/api/ebay/status') as Map<String, dynamic>);
+
+  /// eBay's sign-in page, to open in Safari.
+  Future<Uri> ebayConnectUrl() async {
+    final json = await _send('POST', '/api/ebay/connect', const {}) as Map<String, dynamic>;
+    return Uri.parse(json['url'] as String);
+  }
+
+  Future<void> ebaySyncNow() => _send('POST', '/api/ebay/sync', const {});
+
+  Future<void> ebayAddPurchase(String orderLineId) =>
+      _send('POST', '/api/ebay/purchases/${Uri.encodeComponent(orderLineId)}/add', const {});
+
+  Future<void> ebayHidePurchase(String orderLineId) =>
+      _send('POST', '/api/ebay/purchases/${Uri.encodeComponent(orderLineId)}/hide', const {});
+
+  // ---- Push --------------------------------------------------------------
+
   Future<AlertSettings> registerDevice({
     required String token,
     required bool sandbox,

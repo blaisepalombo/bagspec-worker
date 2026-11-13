@@ -134,6 +134,12 @@ class Flip {
     this.imageUrl,
     this.estimatedProfit,
     this.notes,
+    this.listingId,
+    this.purchasePrice,
+    this.inboundShipping,
+    this.salesTax,
+    this.partsCost,
+    this.packingCost,
   });
 
   final int id;
@@ -148,6 +154,12 @@ class Flip {
   final String? imageUrl;
   final double? estimatedProfit;
   final String? notes;
+  final int? listingId;
+  final double? purchasePrice;
+  final double? inboundShipping;
+  final double? salesTax;
+  final double? partsCost;
+  final double? packingCost;
 
   bool get sold => status == 'sold';
 
@@ -173,6 +185,12 @@ class Flip {
         imageUrl: json['image_url'] as String?,
         estimatedProfit: _num(json['estimated_profit']),
         notes: json['notes'] as String?,
+        listingId: (json['listing_id'] as num?)?.toInt(),
+        purchasePrice: _num(json['purchase_price']),
+        inboundShipping: _num(json['inbound_shipping']),
+        salesTax: _num(json['sales_tax']),
+        partsCost: _num(json['parts_cost']),
+        packingCost: _num(json['packing_cost']),
       );
 }
 
@@ -194,6 +212,64 @@ class Inventory {
       sold: (summary['sold'] as num?)?.toInt() ?? 0,
     );
   }
+}
+
+/// A purchase from the connected eBay account that is not in My flips yet.
+class EbayPurchase {
+  EbayPurchase({required this.orderLineId, required this.itemId, required this.title, this.price, this.shipping, this.imageUrl, this.purchasedAt, this.orderUrl});
+  final String orderLineId;
+  final String itemId;
+  final String title;
+  final double? price;
+  final double? shipping;
+  final String? imageUrl;
+  final DateTime? purchasedAt;
+  final String? orderUrl;
+
+  factory EbayPurchase.fromJson(Map<String, dynamic> json) => EbayPurchase(
+        orderLineId: json['order_line_id'].toString(),
+        itemId: json['item_id'].toString(),
+        title: (json['title'] ?? 'eBay purchase').toString(),
+        price: _num(json['price']),
+        shipping: _num(json['shipping']),
+        imageUrl: json['image_url'] as String?,
+        purchasedAt: parseServerTime(json['purchased_at']),
+        orderUrl: json['order_url'] as String?,
+      );
+}
+
+class EbayStatus {
+  EbayStatus({
+    required this.connected,
+    required this.configured,
+    this.needsReconnect = false,
+    this.lastSyncAt,
+    this.lastSyncError,
+    this.otherPurchases = const [],
+    this.orderLinks = const {},
+  });
+  final bool connected;
+  final bool configured;
+  final bool needsReconnect;
+  final DateTime? lastSyncAt;
+  final String? lastSyncError;
+  final List<EbayPurchase> otherPurchases;
+
+  /// My flips item id -> its eBay order details page.
+  final Map<int, String> orderLinks;
+
+  factory EbayStatus.fromJson(Map<String, dynamic> json) => EbayStatus(
+        connected: json['connected'] == true,
+        configured: json['configured'] == true,
+        needsReconnect: json['needsReconnect'] == true,
+        lastSyncAt: parseServerTime(json['lastSyncAt']),
+        lastSyncError: json['lastSyncError'] as String?,
+        otherPurchases: ((json['otherPurchases'] as List?) ?? const [])
+            .map((e) => EbayPurchase.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        orderLinks: ((json['orderLinks'] as Map?) ?? const {})
+            .map((key, value) => MapEntry(int.tryParse('$key') ?? -1, value.toString())),
+      );
 }
 
 class AlertSettings {

@@ -108,7 +108,7 @@ class _DealsScreenState extends State<DealsScreen> {
                                     child: Text(_loadingOlder ? 'Loading…' : 'Load older deals'),
                                   );
                           }
-                          return DealCard(deal: shown[i]);
+                          return DealCard(deal: shown[i], api: widget.api, onChanged: _refresh);
                         },
                       ),
       ),
@@ -117,8 +117,10 @@ class _DealsScreenState extends State<DealsScreen> {
 }
 
 class DealCard extends StatelessWidget {
-  const DealCard({super.key, required this.deal});
+  const DealCard({super.key, required this.deal, this.api, this.onChanged});
   final Deal deal;
+  final BagSpecApi? api;
+  final VoidCallback? onChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -126,7 +128,11 @@ class DealCard extends StatelessWidget {
     return Card(
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => DealDetailScreen(deal: deal))),
+        onTap: () async {
+          final changed = await Navigator.of(context).push<bool>(
+              MaterialPageRoute(builder: (_) => DealDetailScreen(deal: deal, api: api)));
+          if (changed == true) onChanged?.call();
+        },
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Row(

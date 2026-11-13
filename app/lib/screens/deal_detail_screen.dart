@@ -1,13 +1,43 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../api.dart';
 import '../models.dart';
 import '../theme.dart';
 import 'deals_screen.dart';
+import 'forms.dart';
 
 class DealDetailScreen extends StatelessWidget {
-  const DealDetailScreen({super.key, required this.deal});
+  const DealDetailScreen({super.key, required this.deal, this.api});
   final Deal deal;
+  final BagSpecApi? api;
+
+  /// Saves the deal to My flips, like the website's "I bought this".
+  Future<void> _bought(BuildContext context) async {
+    final saved = await showFormSheet(context,
+        title: 'I bought this',
+        submitLabel: 'Save to My flips',
+        fields: [
+          FormFieldSpec('purchasePrice', deal.isAuction ? 'Winning bid' : 'Price paid',
+              money: true, required: true, initial: deal.isAuction ? null : moneyText(deal.price)),
+          FormFieldSpec('inboundShipping', 'Shipping paid', money: true, initial: moneyText(deal.shipping)),
+          const FormFieldSpec('salesTax', 'Sales tax', money: true, hint: 'Blank = estimate 6%'),
+          const FormFieldSpec('partsCost', 'Parts bought so far', money: true),
+          const FormFieldSpec('notes', 'Notes', hint: 'e.g. ordered a hinge from Amazon'),
+        ],
+        onSubmit: (v) => api!.addFlip(
+              listingId: deal.id,
+              purchasePrice: v['purchasePrice'] as double,
+              inboundShipping: v['inboundShipping'] as double?,
+              salesTax: v['salesTax'] as double?,
+              partsCost: v['partsCost'] as double?,
+              notes: v['notes'] as String?,
+            ));
+    if (saved && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved to My flips.')));
+      Navigator.of(context).pop(true);
+    }
+  }
 
   Future<void> _openOnEbay(BuildContext context) async {
     final url = Uri.tryParse(deal.itemUrl ?? '');
@@ -96,6 +126,16 @@ class DealDetailScreen extends StatelessWidget {
             label: const Text('Open on eBay'),
             style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
           ),
+          if (api != null && !deal.bought) ...[
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              key: const Key('bought-this'),
+              onPressed: () => _bought(context),
+              icon: const Icon(Icons.shopping_bag_outlined),
+              label: const Text('I bought this'),
+              style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+            ),
+          ],
         ],
       ),
     );

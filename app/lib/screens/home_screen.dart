@@ -51,7 +51,7 @@ class _HomeScreenState extends State<HomeScreen> {
         final page = await widget.api.deals();
         final deal = page.deals.where((d) => d.id == opened.dealId).firstOrNull;
         if (deal != null && mounted) {
-          await Navigator.of(context).push(MaterialPageRoute(builder: (_) => DealDetailScreen(deal: deal)));
+          await Navigator.of(context).push(MaterialPageRoute(builder: (_) => DealDetailScreen(deal: deal, api: widget.api)));
           return;
         }
       } catch (_) {}
