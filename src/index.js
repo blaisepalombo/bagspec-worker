@@ -141,7 +141,7 @@ export default {
     }
 
     if (url.pathname === "/dashboard") {
-      return new Response(renderDashboard(), {
+      return new Response(renderDashboard(getBuyBudget(env)), {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store",

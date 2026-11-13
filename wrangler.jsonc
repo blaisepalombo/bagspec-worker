@@ -19,5 +19,10 @@
   ],
   "ai": {
     "binding": "AI"
+  },
+  // All-in cap (price + shipping + 6% tax) for items BagSpec looks at. Up to
+  // $75 the BUY bar stays at $25 profit and a 50% return; above $75 it rises.
+  "vars": {
+    "BUY_BUDGET_USD": "75"
   }
 }
