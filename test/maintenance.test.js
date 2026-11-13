@@ -48,7 +48,7 @@ const veryOldBought = add(100, "rejected", "PASS", "very old but bought");
 const veryOldPurchase = add(100, "expired", "REVIEW", "very old but an eBay purchase");
 const oldWatch = add(30, "analyzed", "WATCH", "old watch deal");
 const oldRejectedWatch = add(30, "rejected", "WATCH", "old rejected watch");
-for (let i = 0; i < 17000; i++) add(20, i % 2 ? "rejected" : "expired", "PASS");
+for (let i = 0; i < 10000; i++) add(20, i % 2 ? "rejected" : "expired", "PASS");
 const oldCandidate = add(20, "candidate", "REVIEW", "old candidate");
 const recent = add(5, "rejected", "PASS", "recent pass");
 db.exec("COMMIT");
@@ -68,8 +68,8 @@ const withText = () => db.prepare("SELECT COUNT(*) AS n FROM listings WHERE desc
 test("day 1 clears up to the daily cap, deletes 90-day-old passes, and trims logs", async () => {
   const before = withText();
   const result = await maybePruneOldData(env, NOW);
-  assert.equal(result.caughtUp, false, "17,000 old rows is more than one day's cap");
-  assert.ok(result.textCleared >= 9000 && result.textCleared <= 10000, `cleared ${result.textCleared}`);
+  assert.equal(result.caughtUp, false, "10,000 old rows is more than one day's cap");
+  assert.ok(result.textCleared >= 5000 && result.textCleared <= 6000, `cleared ${result.textCleared}`);
   assert.equal(withText(), before - result.textCleared, "text is cleared (before any delete)");
 
   assert.equal(row(veryOld), undefined, "100-day-old PASS is deleted");

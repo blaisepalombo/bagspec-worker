@@ -18,11 +18,12 @@ export const TEXT_DAYS = 14;
 export const DELETE_DAYS = 90;
 export const RUN_LOG_DAYS = 30;
 const BATCH_ROWS = 2000;
-// D1's free plan allows 100,000 row writes a day and BagSpec already uses
-// ~30,000, so each day touches at most 10,000 listing rows per sweep and
-// 3,000 rows per log table. The first ~40,000-row backlog takes ~4 days.
-const MAX_BATCHES = 5;
-const MAX_LOG_ROWS = 3000;
+// D1's free plan allows 100,000 row writes a day and the scanner itself uses
+// ~50,000-70,000, so each day touches at most 6,000 listing rows per sweep
+// and 1,000 rows per log table (~9,000 writes). The remaining ~28,000-row
+// backlog takes about five days; after that a day is ~1,500 rows.
+const MAX_BATCHES = 3;
+const MAX_LOG_ROWS = 1000;
 
 const PRUNABLE = `
   status IN ('rejected', 'expired')
