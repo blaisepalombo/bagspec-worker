@@ -10,6 +10,7 @@ import {
   parseWonList,
   sealToken,
   startEbayConnect,
+  maybeSyncEbayPurchases,
   syncEbayPurchases,
 } from "../src/ebay-account.js";
 
@@ -90,6 +91,7 @@ const WON_XML = `<?xml version="1.0" encoding="UTF-8"?>
 </GetMyeBayBuyingResponse>`;
 
 const calls = [];
+let refreshRevoked = false;
 globalThis.fetch = async (input, init = {}) => {
   const url = String(input);
   calls.push({ url, init });
@@ -102,6 +104,9 @@ globalThis.fetch = async (input, init = {}) => {
       return Response.json({ access_token: "access-1", expires_in: 7200, refresh_token: "refresh-1", refresh_token_expires_in: 47304000 });
     }
     assert.equal(body.get("grant_type"), "refresh_token");
+    if (refreshRevoked) {
+      return Response.json({ error: "invalid_grant", error_description: "the provided authorization refresh token is invalid" }, { status: 400 });
+    }
     assert.equal(body.get("refresh_token"), "refresh-1");
     return Response.json({ access_token: "access-2", expires_in: 7200 });
   }
@@ -212,4 +217,57 @@ test("connect, import, dedupe, add and hide", async () => {
   assert.equal(disconnect.status, 200);
   const after = await (await worker.fetch(new Request("https://bagspec.com/api/ebay/status", { headers: admin }), env)).json();
   assert.equal(after.connected, false);
+});
+
+test("a broken eBay sign-in asks for Connect eBay again and pauses the hourly sync", async () => {
+  const connect = async () => {
+    const consent = new URL((await startEbayConnect(env)).headers.get("Location"));
+    await finishEbayConnect(env, new URL("https://bagspec.com/ebay/callback?code=one-time-code&state=" + consent.searchParams.get("state")));
+  };
+  const status = async () => (await worker.fetch(new Request("https://bagspec.com/api/ebay/status", { headers: admin }), env)).json();
+  const expireAccess = () => db.prepare("UPDATE ebay_account SET access_expires_at = '2000-01-01T00:00:00Z', last_sync_at = NULL").run();
+
+  await connect();
+  assert.equal((await status()).needsReconnect, false);
+
+  // 1. The saved token can't be decrypted (a secret changed).
+  expireAccess();
+  db.prepare("UPDATE ebay_account SET refresh_token = 'not.valid'").run();
+  await assert.rejects(syncEbayPurchases(env), /Connect eBay again/);
+  let now = await status();
+  assert.equal(now.connected, true);
+  assert.equal(now.needsReconnect, true);
+  const before = calls.length;
+  assert.equal(await maybeSyncEbayPurchases(env), null, "hourly sync does not keep retrying");
+  assert.equal(calls.length, before);
+
+  // Connecting again clears it.
+  await connect();
+  now = await status();
+  assert.equal(now.needsReconnect, false);
+  assert.equal(now.lastSyncError, null);
+
+  // 2. eBay revoked the refresh token.
+  expireAccess();
+  refreshRevoked = true;
+  await assert.rejects(syncEbayPurchases(env), /Connect eBay again/);
+  assert.equal((await status()).needsReconnect, true);
+  refreshRevoked = false;
+
+  // 3. The 18-month refresh token ran out.
+  await connect();
+  expireAccess();
+  db.prepare("UPDATE ebay_account SET refresh_expires_at = '2001-01-01T00:00:00Z'").run();
+  await assert.rejects(syncEbayPurchases(env), /expired/);
+  assert.equal((await status()).needsReconnect, true);
+
+  // An ordinary eBay outage is not a reconnect.
+  await connect();
+  expireAccess();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("busy", { status: 503 });
+  try { await assert.rejects(syncEbayPurchases(env)); } finally { globalThis.fetch = realFetch; }
+  now = await status();
+  assert.equal(now.needsReconnect, false);
+  assert.ok(now.lastSyncError);
 });

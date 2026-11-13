@@ -34,6 +34,7 @@ export function ensureEbayTables(env) {
             connected_at TEXT,
             last_sync_at TEXT,
             last_sync_error TEXT,
+            needs_reconnect INTEGER NOT NULL DEFAULT 0,
             oauth_state TEXT,
             oauth_state_at TEXT
           )`),
@@ -90,6 +91,12 @@ export async function sealToken(env, token) {
   return `${toBase64(iv)}.${toBase64(sealed)}`;
 }
 
+// Errors that only a fresh "Connect eBay" can fix. The dashboard swaps
+// "Check now" for "Connect eBay again", and the hourly sync stops retrying.
+function reconnectError(message) {
+  return Object.assign(new Error(message), { reconnect: true });
+}
+
 export async function openToken(env, value) {
   const key = await tokenKey(env);
   try {
@@ -99,7 +106,7 @@ export async function openToken(env, value) {
     );
     return new TextDecoder().decode(plain);
   } catch {
-    throw new Error("The saved eBay sign-in can't be read (a secret may have changed). Connect eBay again.");
+    throw reconnectError("The saved eBay sign-in can't be read (a secret may have changed). Connect eBay again.");
   }
 }
 
@@ -150,6 +157,9 @@ async function requestToken(env, params) {
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok || !body.access_token) {
+    if (params.grant_type === "refresh_token" && body.error === "invalid_grant") {
+      throw reconnectError("eBay ended BagSpec's sign-in (it expired or was revoked). Connect eBay again.");
+    }
     throw new Error(`eBay token request failed (${response.status}): ${body.error_description || body.error || "no token"}`);
   }
   return body;
@@ -184,7 +194,7 @@ export async function finishEbayConnect(env, url) {
     UPDATE ebay_account SET
       refresh_token = ?, refresh_expires_at = ?,
       access_token = ?, access_expires_at = ?,
-      connected_at = ?, last_sync_error = NULL,
+      connected_at = ?, last_sync_error = NULL, needs_reconnect = 0,
       oauth_state = NULL, oauth_state_at = NULL
     WHERE id = 1
   `).bind(
@@ -207,6 +217,9 @@ async function getAccessToken(env, account) {
     return openToken(env, account.access_token);
   }
   if (!account.refresh_token) throw new Error("eBay is not connected");
+  if (Date.parse(account.refresh_expires_at || "") <= Date.now()) {
+    throw reconnectError("eBay's sign-in for BagSpec has expired. Connect eBay again.");
+  }
   const token = await requestToken(env, {
     grant_type: "refresh_token",
     refresh_token: await openToken(env, account.refresh_token),
@@ -368,13 +381,13 @@ export async function syncEbayPurchases(env) {
       }
     }
     await env.DB.prepare(
-      "UPDATE ebay_account SET last_sync_at = ?, last_sync_error = NULL WHERE id = 1"
+      "UPDATE ebay_account SET last_sync_at = ?, last_sync_error = NULL, needs_reconnect = 0 WHERE id = 1"
     ).bind(new Date().toISOString()).run();
     return { status: "eBay purchases synced", found: purchases.length, added };
   } catch (error) {
     await env.DB.prepare(
-      "UPDATE ebay_account SET last_sync_at = ?, last_sync_error = ? WHERE id = 1"
-    ).bind(new Date().toISOString(), String(error.message || error).slice(0, 500)).run();
+      "UPDATE ebay_account SET last_sync_at = ?, last_sync_error = ?, needs_reconnect = ? WHERE id = 1"
+    ).bind(new Date().toISOString(), String(error.message || error).slice(0, 500), error.reconnect ? 1 : 0).run();
     throw error;
   }
 }
@@ -383,9 +396,9 @@ export async function syncEbayPurchases(env) {
 export async function maybeSyncEbayPurchases(env) {
   await ensureEbayTables(env);
   const account = await env.DB.prepare(
-    "SELECT refresh_token, last_sync_at FROM ebay_account WHERE id = 1"
+    "SELECT refresh_token, last_sync_at, needs_reconnect FROM ebay_account WHERE id = 1"
   ).first();
-  if (!account?.refresh_token) return null;
+  if (!account?.refresh_token || account.needs_reconnect) return null;
   const last = Date.parse(account.last_sync_at || "");
   if (Number.isFinite(last) && Date.now() - last < SYNC_INTERVAL_MINUTES * 60 * 1000) return null;
   return syncEbayPurchases(env);
@@ -399,7 +412,7 @@ export async function handleEbayAccountRequest(request, env, url) {
   try {
     if (request.method === "GET" && parts[2] === "status") {
       const account = await env.DB.prepare(
-        "SELECT refresh_token, connected_at, last_sync_at, last_sync_error FROM ebay_account WHERE id = 1"
+        "SELECT refresh_token, connected_at, last_sync_at, last_sync_error, needs_reconnect FROM ebay_account WHERE id = 1"
       ).first();
       const { results: otherPurchases } = await env.DB.prepare(`
         SELECT order_line_id, item_id, title, price, shipping, quantity, image_url, purchased_at
@@ -414,6 +427,7 @@ export async function handleEbayAccountRequest(request, env, url) {
         connectedAt: account?.connected_at || null,
         lastSyncAt: account?.last_sync_at || null,
         lastSyncError: account?.last_sync_error || null,
+        needsReconnect: Boolean(account?.refresh_token && account.needs_reconnect),
         otherPurchases,
       });
     }

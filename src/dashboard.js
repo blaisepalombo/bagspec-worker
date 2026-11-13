@@ -259,13 +259,22 @@ export function renderDashboard() {
       return '<div class="ebay-box"><div><strong>Connect your eBay account</strong><p class="hint">BagSpec checks what you buy on eBay once an hour. Purchases it found as deals go into My flips automatically; anything else waits here for you to add or hide.</p>' + (notice ? '<p class="hint">' + esc(notice) + '</p>' : '') + '</div>' + (e.configured ? '<a class="btn small primary" href="/ebay/connect">Connect eBay</a>' : '<span class="hint">Needs the eBay RuName set up first.</span>') + '</div>';
     }
     const others = (e.otherPurchases || []).map(p => '<div class="flip-row"><div class="item"><strong><a href="https://www.ebay.com/itm/' + encodeURIComponent(p.item_id) + '" target="_blank" rel="noopener noreferrer">' + esc(p.title) + '</a></strong><small>' + money(p.price) + ' + ' + money(p.shipping) + ' shipping · ' + esc(when(p.purchased_at)) + '</small></div><div class="buttons"><button class="btn small primary" type="button" data-ebay-add="' + esc(p.order_line_id) + '">Add to My flips</button><button class="btn small" type="button" data-ebay-hide="' + esc(p.order_line_id) + '">Hide</button></div></div>').join('');
-    return '<div class="ebay-box"><div><strong>eBay connected</strong><p class="hint">' + (e.lastSyncAt ? 'Last checked ' + esc(when(e.lastSyncAt)) : 'Not checked yet') + (e.lastSyncError ? ' · Problem: ' + esc(e.lastSyncError) : '') + (notice ? ' · ' + esc(notice) : '') + '</p></div><button class="btn small" type="button" data-ebay-sync="1"' + (state.ebayBusy ? ' disabled' : '') + '>' + (state.ebayBusy ? 'Checking…' : 'Check now') + '</button></div>' +
+    const action = e.needsReconnect
+      ? (e.configured ? '<a class="btn small primary" href="/ebay/connect">Connect eBay again</a>' : '<span class="hint">Needs the eBay RuName set up first.</span>')
+      : '<button class="btn small" type="button" data-ebay-sync="1"' + (state.ebayBusy ? ' disabled' : '') + '>' + (state.ebayBusy ? 'Checking…' : 'Check now') + '</button>';
+    const head = e.needsReconnect
+      ? '<strong>eBay needs to be connected again</strong><p class="hint">' + esc(e.lastSyncError || 'The eBay sign-in stopped working.') + ' Purchases are not being imported until you do. Nothing in My flips is lost.</p>'
+      : '<strong>eBay connected</strong><p class="hint">' + (e.lastSyncAt ? 'Last checked ' + esc(when(e.lastSyncAt)) : 'Not checked yet') + (e.lastSyncError ? ' · Problem: ' + esc(e.lastSyncError) : '') + (notice ? ' · ' + esc(notice) : '') + '</p>';
+    return '<div class="ebay-box"><div>' + head + '</div>' + action + '</div>' +
       (others ? '<h3 class="sub">Other eBay purchases</h3><p class="hint">These did not come from a BagSpec deal. Add the ones you plan to flip.</p><div class="list">' + others + '</div>' : '');
   }
   async function ebayAction(path) {
     state.ebayBusy = true; renderFlips();
     try { await send(path, {}); await loadInventory(); }
-    catch (error) { alert(error.message); }
+    catch (error) {
+      await loadInventory().catch(() => {});
+      if (!state.ebay?.needsReconnect) alert(error.message);
+    }
     finally { state.ebayBusy = false; renderFlips(); }
   }
   function startBuy(id) {
