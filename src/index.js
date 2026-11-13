@@ -2185,9 +2185,10 @@ async function analyzeCandidateBatch(env, limit = 3) {
     Math.max(Number(limit) || 3, 1),
     8
   );
+  const queue = await loadAnalysisQueue(env);
   const results = await runBalancedBatch(
     safeLimit,
-    (excludedCategories) => analyzeNextCandidate(env, excludedCategories),
+    (excludedCategories) => analyzeNextCandidate(env, excludedCategories, queue),
     (error) => handleAnalysisError(env, error)
   );
 
@@ -3231,22 +3232,18 @@ function selectCategoryBalancedListings(listings, limit) {
   return selected;
 }
 
-async function analyzeNextCandidate(env, excludedCategories = []) {
-  const exclusions = Array.isArray(excludedCategories)
-    ? excludedCategories.filter(Boolean)
-    : [];
-  const exclusionSql = exclusions.length
-    ? `AND category NOT IN (${exclusions.map(() => "?").join(", ")})`
-    : "";
-
-  let { results: rankedListings } = await env.DB.prepare(`
-    SELECT *
+// Ranked queue of enriched listings waiting for analysis: ids and categories
+// only. A batch reads it once and then loads each chosen listing by id;
+// reading every waiting row in full for each of the ~7 picks per cycle cost
+// ~100,000 row reads a day and moved ~2.5 KB of description per row.
+export async function loadAnalysisQueue(env) {
+  const { results } = await env.DB.prepare(`
+    SELECT id, category
     FROM listings
     WHERE
       status = 'candidate'
       AND analysis_status = 'details_ready'
       AND (item_creation_date >= datetime('now', '-12 hours') OR (deal_type = 'auction' AND julianday(item_end_date) > julianday('now', '+5 minutes')))
-      ${exclusionSql}
     ORDER BY
       deal_score + CASE
         WHEN deal_type = 'auction' THEN 30
@@ -3256,29 +3253,36 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
       END DESC,
       item_creation_date DESC
     LIMIT 180
-  `).bind(...exclusions).all();
+  `).all();
+  return results;
+}
 
-  if (!rankedListings.length && exclusions.length > 0) {
-    ({ results: rankedListings } = await env.DB.prepare(`
-      SELECT *
-      FROM listings
-      WHERE
-        status = 'candidate'
-        AND analysis_status = 'details_ready'
-        AND (item_creation_date >= datetime('now', '-12 hours') OR (deal_type = 'auction' AND julianday(item_end_date) > julianday('now', '+5 minutes')))
-      ORDER BY
-        deal_score + CASE
-          WHEN deal_type = 'auction' THEN 30
-        WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
-          WHEN item_creation_date >= datetime('now', '-12 hours') THEN 8
-          ELSE 0
-        END DESC,
-        item_creation_date DESC
-      LIMIT 180
-    `).all());
+// Takes the next listing from the queue (best first, rotating through
+// categories), skipping excluded categories unless nothing else is left.
+export function takeFromAnalysisQueue(queue, excludedCategories = []) {
+  const allowed = queue.filter((item) => !excludedCategories.includes(item.category));
+  const pick = selectCategoryBalancedListings(allowed.length ? allowed : queue, 1)[0];
+  if (pick) queue.splice(queue.indexOf(pick), 1);
+  return pick || null;
+}
+
+async function analyzeNextCandidate(env, excludedCategories = [], queue = null) {
+  const exclusions = Array.isArray(excludedCategories)
+    ? excludedCategories.filter(Boolean)
+    : [];
+  const waiting = queue || await loadAnalysisQueue(env);
+
+  // Load the chosen listing in full. Skip any that changed since the queue
+  // was read (for example expired by another run).
+  let listing = null;
+  while (!listing) {
+    const pick = takeFromAnalysisQueue(waiting, exclusions);
+    if (!pick) break;
+    listing = await env.DB.prepare(`
+      SELECT * FROM listings
+      WHERE id = ? AND status = 'candidate' AND analysis_status = 'details_ready'
+    `).bind(pick.id).first();
   }
-
-  const listing = selectCategoryBalancedListings(rankedListings, 1)[0];
 
   if (!listing) {
     return {
