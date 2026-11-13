@@ -1,6 +1,12 @@
 import { renderDashboard } from "./dashboard.js";
 import { ensureInventoryTable, handleInventoryRequest } from "./inventory.js";
 import {
+  finishEbayConnect,
+  handleEbayAccountRequest,
+  maybeSyncEbayPurchases,
+  startEbayConnect,
+} from "./ebay-account.js";
+import {
   CLAUDE_MODEL,
   CLAUDE_SCREEN_MODEL,
   createClaudeClient,
@@ -49,6 +55,42 @@ export default {
         });
       }
       return handleInventoryRequest(request, env, url);
+    }
+
+    // Connected eBay account: status, sync, and imported purchases. Owner only.
+    if (url.pathname.startsWith("/api/ebay/")) {
+      if (!isAuthorized(request, env)) {
+        const quiet = request.headers.get("X-BagSpec-Quiet") === "1";
+        return new Response("BagSpec login required", {
+          status: 401,
+          headers: quiet ? {} : { "WWW-Authenticate": 'Basic realm="BagSpec Admin"' },
+        });
+      }
+      return handleEbayAccountRequest(request, env, url);
+    }
+
+    // eBay sign-in. Starting needs the owner login; eBay redirects back to
+    // the callback, which is checked with the one-time state value instead.
+    if (request.method === "GET" && url.pathname === "/ebay/connect") {
+      if (!isAuthorized(request, env)) {
+        return new Response("BagSpec login required", {
+          status: 401,
+          headers: { "WWW-Authenticate": 'Basic realm="BagSpec Admin"' },
+        });
+      }
+      try {
+        return await startEbayConnect(env);
+      } catch (error) {
+        return new Response(String(error.message || error), { status: 500 });
+      }
+    }
+    if (request.method === "GET" && url.pathname === "/ebay/callback") {
+      try {
+        return await finishEbayConnect(env, url);
+      } catch (error) {
+        console.error("eBay connect failed", error);
+        return Response.redirect(`${url.origin}/dashboard?ebay=failed#flips`, 302);
+      }
     }
 
     // Acknowledge eBay deletion notifications
@@ -345,6 +387,9 @@ export default {
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil(runAutomatedCycle(env));
+    ctx.waitUntil(maybeSyncEbayPurchases(env).catch((error) => {
+      console.error("eBay purchase sync failed", error);
+    }));
   },
 };
 
