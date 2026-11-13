@@ -20,10 +20,11 @@ Two deal types are scanned:
   comes straight from working comparables. Flips are tagged on the
   dashboard and in Discord alerts.
 
-**Budget**: BagSpec only looks at items that cost at most $50 all-in
-(price + shipping + 6% tax; change with `BUY_BUDGET_USD`). eBay searches ask
-only for items priced under that, and anything that ends up over it after
-real shipping is passed. With a budget this small, a BUY needs $25+ profit
+**Budget**: BagSpec only looks at items that cost at most $75 all-in
+(price + shipping + 6% tax; set by `BUY_BUDGET_USD` in `wrangler.jsonc`, and
+the default is $50). eBay searches ask only for items priced under that, and
+anything that ends up over it after real shipping is passed. With a budget
+of $75 or less, a BUY needs $25+ profit
 and a 50%+ return (WATCH: $15 and 35%). Searches favor broken cameras and
 Nintendo handhelds, which fit the budget best.
 
