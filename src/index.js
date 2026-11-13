@@ -658,7 +658,44 @@ const MODEL_RESALE = [
   // Rounded down toward the US sale for working i5 units.
   { model: "ThinkPad T480", resale: 160, pattern: /\bt480\b/ },
   { model: "ThinkPad T470", resale: 130, pattern: /\bt470\b/ },
-].map((entry) => ({ category: "Business Laptops", ...entry })));
+].map((entry) => ({ category: "Business Laptops", ...entry }))).concat(
+  // eBay sold listings checked on 2026-11-13: used, working units only (parts,
+  // broken, bundles, lots and accessories removed), and "best offer
+  // accepted" sales left out because eBay hides what they really sold for.
+  // The median is used, or the lower quartile when prices spread widely
+  // (upper quartile over 1.6x the lower), rounded down to $5. These are the
+  // models BagSpec analyzes most that had no sold reference, so they could
+  // never reach BUY. `sales` is how many sales the figure came from.
+  [
+    { model: "Sony WH-1000XM5", resale: 110, sales: 80, pattern: /\bwh-?1000\s*xm5\b/ },
+    { model: "Sony WH-1000XM4", resale: 105, sales: 46, pattern: /\bwh-?1000\s*xm4\b/ },
+    { model: "Sony WH-1000XM3", resale: 50, sales: 76, pattern: /\bwh-?1000\s*xm3\b/ },
+    { model: "Apple AirPods Max", resale: 120, sales: 59, pattern: /\bairpods\s+max\b/ },
+    { model: "Bose QuietComfort Ultra headphones", resale: 150, sales: 57,
+      pattern: /\b(?:qc|quiet\s*comfort)\s*ultra\b/, exclude: /\b(?:ear)?buds\b/ },
+    { model: "Bose QuietComfort 45", resale: 85, sales: 81, pattern: /\b(?:qc|quiet\s*comfort)\s*45\b/ },
+    { model: "Bose QuietComfort 35", resale: 65, sales: 66, pattern: /\b(?:qc|quiet\s*comfort)\s*35\b/ },
+    { model: "Beats Studio3", resale: 55, sales: 68, pattern: /\bbeats\b[\s\S]*\bstudio\s*3\b/ },
+    { model: "Beats Solo3", resale: 30, sales: 78, pattern: /\bbeats\b[\s\S]*\bsolo\s*3\b/ },
+  ].map((entry) => ({ category: "Headphones", checked: "2026-11-13", ...entry })),
+  [
+    { model: "Bose SoundLink Flex", resale: 65, sales: 92, pattern: /\bsoundlink\s+flex\b/ },
+    { model: "Bose SoundLink Mini", resale: 55, sales: 88, pattern: /\bsoundlink\s+mini\b/ },
+    { model: "Bose SoundLink Color", resale: 40, sales: 93, pattern: /\bsoundlink\s+colou?r\b/ },
+    { model: "JBL Charge 5", resale: 70, sales: 75, pattern: /\bjbl\b[\s\S]*\bcharge\s*5\b/ },
+  ].map((entry) => ({ category: "Premium Audio", checked: "2026-11-13", ...entry })),
+  [
+    { model: "PlayStation 3", resale: 80, sales: 72, pattern: /\b(?:ps3|playstation\s*3)\b/ },
+    { model: "Xbox 360", resale: 50, sales: 55, pattern: /\bxbox\s*360\b/ },
+    { model: "Nintendo Wii", resale: 25, sales: 46, pattern: /\bwii\b/, exclude: /\bwii\s*u\b/ },
+  ].map((entry) => ({ category: "Game Consoles", checked: "2026-11-13", ...entry })),
+  [
+    { model: "Dell Latitude 5420", resale: 190, sales: 47, pattern: /\blatitude\s*5420\b/, exclude: /\brugged\b/ },
+    { model: "Dell Latitude 5400", resale: 65, sales: 61, pattern: /\blatitude\s*5400\b/, exclude: /\brugged\b/ },
+    { model: "HP EliteBook 850 G5", resale: 145, sales: 62, pattern: /\b850\s*g5\b/ },
+    { model: "HP EliteBook 840 G5", resale: 140, sales: 74, pattern: /\b840\s*g5\b/ },
+  ].map((entry) => ({ category: "Business Laptops", checked: "2026-11-13", ...entry })),
+).map((entry) => ({ source: entry.checked ? "eBay sold listings (used, working)" : undefined, ...entry }));
 
 // Without a sold reference, resale comes from active asking prices, which
 // run well above what items sell for (T480 listings ask EUR 257-375 but sell
@@ -741,7 +778,7 @@ function getRepairPartsCost(faultType, listing, evidence) {
   return prices[key] ?? prices.default ?? null;
 }
 
-function matchModelResale(title, category) {
+export function matchModelResale(title, category) {
   const text = String(title || "").toLowerCase();
   return MODEL_RESALE.find((entry) =>
     entry.category === category &&
