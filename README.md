@@ -100,6 +100,23 @@ The following secrets stay in Cloudflare and must never be committed:
 - `DISCORD_WEBHOOK_URL`
 - `ANTHROPIC_API_KEY` (Claude BUY check; without it nothing reaches BUY)
 - `CLAUDE_DAILY_CALL_LIMIT` (optional, default 10)
+- `EBAY_RUNAME` (optional; turns on "Connect eBay" in My flips)
+
+## Connected eBay account
+
+My flips can import what the owner buys on eBay. BagSpec signs in with
+eBay's OAuth authorization code grant, stores the tokens encrypted in D1, and
+reads won items with the Trading API `GetMyeBayBuying` call once an hour.
+Purchases of listings BagSpec found are added to My flips automatically;
+other purchases are listed for the owner to add or hide.
+
+Setup:
+
+1. In the eBay Developers Program, open **User Tokens** for the production
+   keyset, add an eBay Redirect URL (RuName), and set its **auth accepted
+   URL** to `https://bagspec.com/ebay/callback`.
+2. Save the RuName as a secret: `npx wrangler secret put EBAY_RUNAME`.
+3. Sign in to the dashboard, open **My flips**, and press **Connect eBay**.
 
 ## Commands
 

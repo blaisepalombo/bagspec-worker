@@ -86,6 +86,9 @@ export function renderDashboard() {
     .ends { color:#9fc7ff; font-weight:650; }
     .more { display:flex; justify-content:center; padding:8px 0 4px; }
     .flip-tools { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 14px; }
+    .ebay-box { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px 16px; padding:14px 16px; margin:0 0 14px; background:var(--surface); border:1px solid var(--line); border-radius:8px; }
+    .ebay-box p { margin:4px 0 0; }
+    .sub { font-size:15px; margin:18px 0 4px; }
     .flip-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px 16px; padding:14px 16px; background:var(--surface); border:1px solid var(--line); border-radius:8px; }
     .flip-row .item strong { display:block; font-size:15px; } .flip-row .item small { color:var(--muted); font-size:13px; }
     .flip-row .money { text-align:right; font-size:13px; color:var(--muted); white-space:nowrap; }
@@ -126,7 +129,7 @@ export function renderDashboard() {
 <script>
 (() => {
   const $ = id => document.getElementById(id);
-  const state = { tab: location.hash === '#flips' ? 'flips' : 'deals', category:'All', deals:[], nextBefore:null, loadingOlder:false, stale:null, listings:[], diagnostics:null, inventory:{ items:[], summary:{} }, inventoryLocked:false };
+  const state = { tab: location.hash === '#flips' ? 'flips' : 'deals', category:'All', deals:[], nextBefore:null, loadingOlder:false, stale:null, listings:[], diagnostics:null, inventory:{ items:[], summary:{} }, inventoryLocked:false, ebay:null, ebayBusy:false };
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const money = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) ? '$' + Number(value).toFixed(2) : '—';
   const date = value => { if (!value) return null; const d = new Date(String(value).includes('T') ? value : String(value).replace(' ', 'T') + 'Z'); return Number.isNaN(d.getTime()) ? null : d; };
@@ -212,7 +215,7 @@ export function renderDashboard() {
         : '<strong>' + money(x.cost) + '</strong>spent so far' + (x.estimated_profit !== null && x.estimated_profit !== undefined ? '<br>BagSpec guessed ' + money(x.estimated_profit) + ' profit' : '');
       return '<div class="flip-row"><div class="item"><strong>' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + name + '</a>' : name) + '</strong><small><span class="tag ' + (x.status === 'sold' ? '' : x.status === 'failed' ? 'pass' : 'watch') + '">' + esc(STATUS_LABELS[x.status] || x.status) + '</span> · paid ' + money(x.purchase_price) + ' + ' + money(x.inbound_shipping) + ' shipping + ' + money(x.sales_tax) + ' tax · parts ' + money(x.parts_cost) + ' · ' + esc(when(x.purchased_at)) + (x.notes ? ' · ' + esc(x.notes) : '') + '</small></div><div class="money">' + right + '</div><div class="buttons"><button class="btn small" type="button" data-edit="' + esc(x.id) + '">Update</button>' + (x.status === 'sold' ? '' : '<button class="btn small primary" type="button" data-sold="' + esc(x.id) + '">Mark sold</button>') + '<button class="btn small" type="button" data-delete="' + esc(x.id) + '">Delete</button></div></div>';
     }).join('');
-    $('flips').innerHTML = metrics + tools + (rows ? '<div class="list">' + rows + '</div>' : empty('No flips yet','When you buy something, press "I bought this" on the deal, or "+ Add an item".'));
+    $('flips').innerHTML = metrics + ebayPanel() + tools + (rows ? '<div class="list">' + rows + '</div>' : empty('No flips yet','When you buy something, press "I bought this" on the deal, or "+ Add an item".'));
   }
   let dlgSubmit = null;
   function openForm(title, fields, submitLabel, onSubmit) {
@@ -243,6 +246,36 @@ export function renderDashboard() {
     if (!r.ok) throw new Error('/api/inventory returned ' + r.status);
     state.inventoryLocked = false;
     state.inventory = await r.json();
+    try {
+      const e = await fetch('/api/ebay/status', { cache:'no-store', headers:{ 'X-BagSpec-Quiet':'1' } });
+      state.ebay = e.ok ? await e.json() : null;
+    } catch { state.ebay = null; }
+  }
+  function ebayPanel() {
+    const e = state.ebay;
+    if (!e) return '';
+    const notice = { connected:'eBay is connected. Your purchases will show up here.', declined:'eBay sign-in was cancelled.', expired:'That eBay sign-in link expired. Please try again.', failed:'Connecting eBay did not work. Please try again.' }[new URLSearchParams(location.search).get('ebay')] || '';
+    if (!e.connected) {
+      return '<div class="ebay-box"><div><strong>Connect your eBay account</strong><p class="hint">BagSpec checks what you buy on eBay once an hour. Purchases it found as deals go into My flips automatically; anything else waits here for you to add or hide.</p>' + (notice ? '<p class="hint">' + esc(notice) + '</p>' : '') + '</div>' + (e.configured ? '<a class="btn small primary" href="/ebay/connect">Connect eBay</a>' : '<span class="hint">Needs the eBay RuName set up first.</span>') + '</div>';
+    }
+    const others = (e.otherPurchases || []).map(p => '<div class="flip-row"><div class="item"><strong><a href="https://www.ebay.com/itm/' + encodeURIComponent(p.item_id) + '" target="_blank" rel="noopener noreferrer">' + esc(p.title) + '</a></strong><small>' + money(p.price) + ' + ' + money(p.shipping) + ' shipping · ' + esc(when(p.purchased_at)) + '</small></div><div class="buttons"><button class="btn small primary" type="button" data-ebay-add="' + esc(p.order_line_id) + '">Add to My flips</button><button class="btn small" type="button" data-ebay-hide="' + esc(p.order_line_id) + '">Hide</button></div></div>').join('');
+    const action = e.needsReconnect
+      ? (e.configured ? '<a class="btn small primary" href="/ebay/connect">Connect eBay again</a>' : '<span class="hint">Needs the eBay RuName set up first.</span>')
+      : '<button class="btn small" type="button" data-ebay-sync="1"' + (state.ebayBusy ? ' disabled' : '') + '>' + (state.ebayBusy ? 'Checking…' : 'Check now') + '</button>';
+    const head = e.needsReconnect
+      ? '<strong>eBay needs to be connected again</strong><p class="hint">' + esc(e.lastSyncError || 'The eBay sign-in stopped working.') + ' Purchases are not being imported until you do. Nothing in My flips is lost.</p>'
+      : '<strong>eBay connected</strong><p class="hint">' + (e.lastSyncAt ? 'Last checked ' + esc(when(e.lastSyncAt)) : 'Not checked yet') + (e.lastSyncError ? ' · Problem: ' + esc(e.lastSyncError) : '') + (notice ? ' · ' + esc(notice) : '') + '</p>';
+    return '<div class="ebay-box"><div>' + head + '</div>' + action + '</div>' +
+      (others ? '<h3 class="sub">Other eBay purchases</h3><p class="hint">These did not come from a BagSpec deal. Add the ones you plan to flip.</p><div class="list">' + others + '</div>' : '');
+  }
+  async function ebayAction(path) {
+    state.ebayBusy = true; renderFlips();
+    try { await send(path, {}); await loadInventory(); }
+    catch (error) {
+      await loadInventory().catch(() => {});
+      if (!state.ebay?.needsReconnect) alert(error.message);
+    }
+    finally { state.ebayBusy = false; renderFlips(); }
   }
   function startBuy(id) {
     const x = state.deals.find(d => String(d.id) === String(id));
@@ -302,8 +335,11 @@ export function renderDashboard() {
     finally { $('dlg-submit').disabled = false; }
   });
   document.addEventListener('click', async event => {
-    const t = event.target.closest('[data-buy],[data-add],[data-edit],[data-sold],[data-delete],[data-older]');
+    const t = event.target.closest('[data-buy],[data-add],[data-edit],[data-sold],[data-delete],[data-older],[data-ebay-sync],[data-ebay-add],[data-ebay-hide]');
     if (!t) return;
+    if (t.dataset.ebaySync) return ebayAction('/api/ebay/sync');
+    if (t.dataset.ebayAdd) return ebayAction('/api/ebay/purchases/' + encodeURIComponent(t.dataset.ebayAdd) + '/add');
+    if (t.dataset.ebayHide) return ebayAction('/api/ebay/purchases/' + encodeURIComponent(t.dataset.ebayHide) + '/hide');
     if (t.dataset.older) return loadOlder();
     if (t.dataset.buy) return startBuy(t.dataset.buy);
     if (t.dataset.add) return startAdd();
