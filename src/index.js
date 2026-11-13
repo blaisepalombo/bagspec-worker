@@ -6,6 +6,7 @@ import {
   maybeSyncEbayPurchases,
   startEbayConnect,
 } from "./ebay-account.js";
+import { maybePruneOldData } from "./maintenance.js";
 import {
   CLAUDE_MODEL,
   CLAUDE_SCREEN_MODEL,
@@ -1976,6 +1977,14 @@ async function runAutomatedCycle(env) {
     }
   }
 
+  // Daily clean-up of old listing text and logs (keeps D1 under 500 MB).
+  try {
+    const pruned = await maybePruneOldData(env);
+    if (pruned) result.maintenance = pruned;
+  } catch (error) {
+    console.error("Database clean-up failed", error);
+  }
+
   const errors = Object.entries(result)
     .filter(([, value]) =>
       /failed/i.test(value.status || "") ||
@@ -2390,6 +2399,9 @@ async function getDiagnostics(env) {
     passReasonsLast24Hours: passReasons.results,
     closestPassesLast24Hours: nearMisses.results,
     recentScreeningsWithRealQueries: validScreens.results,
+    lastDatabaseCleanup: await env.DB.prepare(
+      "SELECT value FROM maintenance_state WHERE key = 'last_prune_result'"
+    ).first().then((row) => (row ? JSON.parse(row.value) : null), () => null),
   };
 }
 
