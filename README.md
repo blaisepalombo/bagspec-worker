@@ -83,6 +83,14 @@ A BUY needs evidence, not just an estimate:
 locked devices, liquid damage, bulk lots, and incomplete products before
 spending calls on enrichment or AI analysis.
 
+## iPhone app
+
+`app/` is a Flutter app for iPhone, shipped through TestFlight by the
+"TestFlight beta" GitHub Action. BUY deals, auctions to bid on and the 7 PM
+digest are pushed straight to Apple (APNs) from the Worker, alongside
+Discord. A deal counts as alerted once either channel delivers it. Setup is
+in `app/README.md`.
+
 ## Cloudflare bindings
 
 - `DB`: D1 database named `bagspec-production`
@@ -101,6 +109,8 @@ The following secrets stay in Cloudflare and must never be committed:
 - `ANTHROPIC_API_KEY` (Claude BUY check; without it nothing reaches BUY)
 - `CLAUDE_DAILY_CALL_LIMIT` (optional, default 10)
 - `EBAY_RUNAME` (optional; turns on "Connect eBay" in My flips)
+- `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_PRIVATE_KEY` (optional; iPhone push for the
+  app in `app/`, see `app/README.md`)
 
 ## Connected eBay account
 

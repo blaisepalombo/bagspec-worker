@@ -1,0 +1,49 @@
+name: iPhone app check
+
+on:
+  pull_request:
+    paths: ["app/**", ".github/workflows/app-check.yml"]
+  push:
+    branches: [main]
+    paths: ["app/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Analyze and test the Flutter app
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.2
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze lib test
+      - run: flutter test
+
+  ios-build:
+    # Compiles the Swift and Flutter code for iPhone without signing, so
+    # build errors show up on the pull request, not in the TestFlight run.
+    name: Build for iPhone (unsigned)
+    runs-on: macos-26
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.2
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build ios --release --no-codesign

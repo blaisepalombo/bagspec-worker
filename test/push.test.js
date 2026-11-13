@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import worker, { sendPendingDealAlerts } from "../src/index.js";
+import worker, { sendDailyWatchDigest, sendPendingDealAlerts } from "../src/index.js";
 import { dealNotification, providerToken } from "../src/push.js";
 
 function fakeD1(db) {
@@ -121,6 +121,27 @@ test("a new BUY deal is pushed to the phone, once, and dead tokens are dropped",
   assert.equal(gone.failed, 1);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM push_devices").get().n, 0);
   apnsReply = () => new Response(null, { status: 200 });
+});
+
+test("the 7 PM digest reaches phones that turned it on", async () => {
+  const OTHER = "c3".repeat(32);
+  await api("/api/devices", { method: "POST", headers: admin, body: JSON.stringify({ token: TOKEN, settings: { digest: true } }) });
+  await api("/api/devices", { method: "POST", headers: admin, body: JSON.stringify({ token: OTHER }) }); // digest off by default
+  db.prepare(`INSERT INTO listings (id, ebay_item_id, title, item_url, category, recommendation, analysis_status,
+      estimated_profit, total_buy_cost) VALUES (78, 'v1|78|0', 'Sony WH-1000XM3 broken hinge', 'https://www.ebay.com/itm/78',
+      'Headphones', 'WATCH', 'complete', 24, 30)`).run();
+
+  apns.length = 0;
+  const result = await sendDailyWatchDigest(env, new Date("2026-11-13T03:00:00Z")); // 8 PM in Idaho
+  assert.equal(result.pushed, 1, JSON.stringify(result));
+  assert.equal(apns.length, 1, "only the phone with the digest on");
+  assert.equal(apns[0].url, `https://api.push.apple.com/3/device/${TOKEN}`);
+  assert.match(apns[0].body.aps.alert.title, /^Today's top \d+ near-deals?$/);
+  assert.match(apns[0].body.aps.alert.body, /^Best: .+ · est\. \$\d+\.\d\d profit$/);
+  assert.ok(apns[0].body.dealId, "tapping opens the best deal");
+
+  const again = await sendDailyWatchDigest(env, new Date("2026-11-13T04:00:00Z"));
+  assert.equal(again.sent, 0, "once a day");
 });
 
 test("auction deals say how much to bid", () => {
