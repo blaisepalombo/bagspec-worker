@@ -337,6 +337,7 @@ export default {
           repair_risk,
           deal_score,
           suggested_offer,
+          offer_needed,
           recommended_channel,
           recommendation,
           reasoning,
@@ -604,6 +605,14 @@ const FRESH_LISTING_HOURS = 12;
 const AUCTION_WINDOW_HOURS = 12;
 const AUCTION_MIN_MINUTES_LEFT = 10;
 const AUCTION_LISTINGS_PER_SEARCH = 40;
+// Best Offer: fixed-price listings that accept offers may ask up to 1.4x the
+// budget, since the seller may take less. They are judged at the most BagSpec
+// would offer, and can only be a BUY when that offer is at least 75% of the
+// asking price (sellers rarely accept much lower). Searched every other cycle
+// to keep Browse API calls down.
+const BEST_OFFER_BUDGET_MULTIPLIER = 1.4;
+const BEST_OFFER_MIN_SHARE_OF_ASKING = 0.75;
+const BEST_OFFER_SEARCH_EVERY_CYCLES = 2;
 // Daily cap on Claude BUY checks (about 1-3 cents each with claude-sonnet-5-5).
 // Override with the CLAUDE_DAILY_CALL_LIMIT variable.
 const DAILY_VERIFICATION_LIMIT = 10;
@@ -944,6 +953,34 @@ export function getBuyBudget(env = {}) {
 // Highest item price (before shipping) that can still fit the budget.
 export function getMaxItemPrice(env = {}) {
   return Math.floor(getBuyBudget(env) / (1 + SALES_TAX_RATE));
+}
+
+// Most a Best Offer listing may cost all-in at its asking price.
+export function getBestOfferCeiling(env = {}) {
+  return Math.round(getBuyBudget(env) * BEST_OFFER_BUDGET_MULTIPLIER * 100) / 100;
+}
+
+export function acceptsOffers(buyingOptions) {
+  return Array.isArray(buyingOptions) && buyingOptions.includes("BEST_OFFER");
+}
+
+// A cost is affordable when it fits the budget, or when the listing takes
+// offers and asks no more than the Best Offer ceiling.
+export function isAffordable(cost, env = {}, offers = false) {
+  return cost <= getBuyBudget(env) || (offers && cost <= getBestOfferCeiling(env));
+}
+
+// An offer deal needs the seller to accept less than the asking price.
+export function isOfferDeal(cost, env = {}, offers = false) {
+  return offers && cost > getBuyBudget(env) && cost <= getBestOfferCeiling(env);
+}
+
+// The most to offer is the highest price that still makes the BUY profit and
+// return within budget (the same math as an auction's max bid). It is only
+// realistic when it is a fair share of the asking price.
+export function getBestOfferPlan({ maxOffer, askingPrice }) {
+  const minRealistic = Math.ceil(Number(askingPrice || 0) * BEST_OFFER_MIN_SHARE_OF_ASKING);
+  return { maxOffer, minRealistic, realistic: maxOffer >= minRealistic && maxOffer > 0 };
 }
 
 function overBudgetClassification(cost, budget) {
@@ -1649,6 +1686,16 @@ async function scanListings(env) {
         query: getSearchTerm(auctionSearch, Math.floor(scanSlot / searches.length) + 1),
         dealType: "auction",
       });
+      // Every other cycle, one Best Offer search for listings just over
+      // budget whose sellers may accept less.
+      if (scanSlot % BEST_OFFER_SEARCH_EVERY_CYCLES === 0) {
+        const offerSearch = searches[(Math.floor(scanSlot / BEST_OFFER_SEARCH_EVERY_CYCLES) + 5) % searches.length];
+        searchTasks.push({
+          search: offerSearch,
+          query: getSearchTerm(offerSearch, Math.floor(scanSlot / searches.length) + 2),
+          dealType: "best_offer",
+        });
+      }
     }
     for (const { search, query, dealType } of searchTasks) {
       const ebayUrl = new URL(
@@ -1685,9 +1732,13 @@ async function scanListings(env) {
         Math.floor(maxItemPrice * 0.3)
       );
       const repairMaxPrice = Math.min(search.max_price, maxItemPrice);
+      // Best Offer covers only the band above the normal searches' ceiling.
+      const offerMaxPrice = Math.floor(getBestOfferCeiling(env) / (1 + SALES_TAX_RATE));
       ebayUrl.searchParams.set(
         "filter",
-        dealType === "flip"
+        dealType === "best_offer"
+          ? `conditionIds:{3000|7000},buyingOptions:{BEST_OFFER},itemLocationCountry:US,price:[${maxItemPrice + 1}..${offerMaxPrice}],priceCurrency:USD`
+          : dealType === "flip"
           ? `conditionIds:{3000},buyingOptions:{FIXED_PRICE},itemLocationCountry:US,price:[${flipMinPrice}..${flipMaxPrice}],priceCurrency:USD`
           : dealType === "auction"
             ? `conditionIds:{7000},buyingOptions:{AUCTION},itemLocationCountry:US,price:[..${repairMaxPrice}],priceCurrency:USD,itemEndDate:[${toEbayDate(Date.now() + AUCTION_MIN_MINUTES_LEFT * 60000)}..${toEbayDate(Date.now() + AUCTION_WINDOW_HOURS * 3600000)}]`
@@ -1726,12 +1777,12 @@ async function scanListings(env) {
         const isRecent = Number.isFinite(postedAt) &&
           postedAt <= Date.now() && postedAt >= Date.now() - FRESH_LISTING_HOURS * 60 * 60 * 1000;
         if (!isRecent) olderOrUndatedIgnored += 1;
-        return isRecent;
+        return isRecent && (dealType !== "best_offer" || acceptsOffers(item.buyingOptions));
       });
       // Popular flip searches return hundreds of fresh working listings.
       // Only the cheapest few can be underpriced, and storing the rest would
       // flood the enrichment queue and D1's daily write allowance.
-      if (dealType === "flip") {
+      if (dealType === "flip" || dealType === "best_offer") {
         recentItems.sort((a, b) =>
           Number(a.price?.value || 0) - Number(b.price?.value || 0));
         recentItems.splice(FLIP_LISTINGS_PER_SEARCH);
@@ -1761,14 +1812,22 @@ async function scanListings(env) {
             ) / 100;
 
           const screeningCost = shippingQuote === null ? price * 1.06 : totalBuyCost;
-          const classification = screeningCost > getBuyBudget(env)
-            ? overBudgetClassification(screeningCost, getBuyBudget(env))
+          const offers = acceptsOffers(item.buyingOptions);
+          // A Best Offer result is a repair when it is sold for parts, and a
+          // flip otherwise. Over-budget offer listings are screened at the
+          // budget, the most BagSpec would pay after the offer.
+          const itemDealType = dealType === "best_offer"
+            ? (String(item.conditionId) === "7000" ? "repair" : "flip")
+            : dealType;
+          const budget = getBuyBudget(env);
+          const classification = !isAffordable(screeningCost, env, offers)
+            ? overBudgetClassification(screeningCost, budget)
             : classifyTitle(
                 item.title || "",
-                totalBuyCost,
+                isOfferDeal(screeningCost, env, offers) ? budget : totalBuyCost,
                 search.profile_key || search.category || search.name,
-                screeningCost,
-                dealType
+                Math.min(screeningCost, budget),
+                itemDealType
               );
 
           return env.DB.prepare(`
@@ -1812,7 +1871,7 @@ async function scanListings(env) {
             classification.score,
             classification.recommendation,
             classification.reasoning,
-            classification.dealType || dealType,
+            classification.dealType || itemDealType,
             item.seller?.username || null
           );
         });
@@ -2177,6 +2236,12 @@ async function createRuntimeTables(env) {
   if (!listingColumns.some((column) => column.name === "deal_type")) {
     await env.DB.prepare(
       "ALTER TABLE listings ADD COLUMN deal_type TEXT NOT NULL DEFAULT 'repair'"
+    ).run();
+  }
+  // 1 when a deal depends on the seller accepting a Best Offer.
+  if (!listingColumns.some((column) => column.name === "offer_needed")) {
+    await env.DB.prepare(
+      "ALTER TABLE listings ADD COLUMN offer_needed INTEGER NOT NULL DEFAULT 0"
     ).run();
   }
   await env.DB.prepare(`
@@ -2616,7 +2681,7 @@ async function sendDiscordTest(env) {
   };
 }
 
-function buildDiscordDealPayload(listing) {
+export function buildDiscordDealPayload(listing) {
   let financials = {};
 
   try {
@@ -2650,6 +2715,12 @@ function buildDiscordDealPayload(listing) {
         ? {
             name: "Bid up to",
             value: `$${Number(listing.suggested_offer || 0).toFixed(2)} (current $${Number(listing.price || 0).toFixed(2)})`,
+            inline: true,
+          }
+        : Number(listing.offer_needed) === 1
+        ? {
+            name: "Offer up to",
+            value: `$${Number(listing.suggested_offer || 0).toFixed(2)} (asks $${Number(listing.price || 0).toFixed(2)})`,
             inline: true,
           }
         : {
@@ -2729,7 +2800,9 @@ function buildDiscordDealPayload(listing) {
   return {
     content: listing.deal_type === "auction"
       ? `⏰ **BagSpec auction deal**: bid up to $${Number(listing.suggested_offer || 0).toFixed(2)}`
-      : "🔥 **BagSpec found a BUY deal**",
+      : Number(listing.offer_needed) === 1
+        ? `🤝 **BagSpec Best Offer deal**: offer up to $${Number(listing.suggested_offer || 0).toFixed(2)}`
+        : "🔥 **BagSpec found a BUY deal**",
     embeds: [embed],
   };
 }
@@ -2759,7 +2832,9 @@ export function buildWatchDigestPayload(rows, localDate) {
   const lines = rows.map((row, index) => {
     const kind = row.deal_type === "auction"
       ? `auction, bid up to $${Number(row.suggested_offer || 0).toFixed(0)}`
-      : row.deal_type === "flip" ? "working flip" : "repair";
+      : Number(row.offer_needed) === 1
+        ? `${row.deal_type === "flip" ? "working flip" : "repair"}, offer up to $${Number(row.suggested_offer || 0).toFixed(0)} (asks $${Number(row.price || 0).toFixed(0)})`
+        : row.deal_type === "flip" ? "working flip" : "repair";
     return `**${index + 1}. [${truncateDiscord(row.title, 90)}](${row.item_url})**\n` +
       `$${Number(row.total_buy_cost || 0).toFixed(2)} all-in • ` +
       `est. profit $${Number(row.estimated_profit || 0).toFixed(2)} ` +
@@ -2792,7 +2867,7 @@ export async function sendDailyWatchDigest(env, now = new Date()) {
 
   const { results: rows } = await env.DB.prepare(`
     SELECT id, title, item_url, category, deal_type, recommendation, total_buy_cost,
-      estimated_profit, roi_percent, suggested_offer
+      estimated_profit, roi_percent, suggested_offer, offer_needed, price
     FROM listings
     WHERE recommendation IN ('WATCH', 'BUY')
       AND analysis_status = 'complete'
@@ -2950,7 +3025,7 @@ async function enrichCandidates(env, limit = 10) {
       END DESC,
       item_creation_date DESC
     LIMIT 180
-  `).bind(1 + SALES_TAX_RATE, getBuyBudget(env)).all();
+  `).bind(1 + SALES_TAX_RATE, getBestOfferCeiling(env)).all();
 
   const listings = selectCategoryBalancedListings(
     rankedListings,
@@ -3035,6 +3110,7 @@ async function enrichCandidates(env, limit = 10) {
           condition: item.condition || "",
           description: JSON.stringify(savedDetails),
           shipping: quotedShipping(item.shippingOptions),
+          acceptsOffers: acceptsOffers(item.buyingOptions),
           // For an auction, the current bid is what it costs right now.
           price: Number(item.currentBidPrice?.value ?? item.price?.value),
         };
@@ -3062,7 +3138,7 @@ async function enrichCandidates(env, limit = 10) {
       }
       const tax = Math.round((outcome.price + outcome.shipping) * 0.06 * 100) / 100;
       const buyCost = Math.round((outcome.price + outcome.shipping + tax) * 100) / 100;
-      if (buyCost > getBuyBudget(env)) {
+      if (!isAffordable(buyCost, env, outcome.acceptsOffers)) {
         const over = overBudgetClassification(buyCost, getBuyBudget(env));
         return env.DB.prepare(`
           UPDATE listings SET description = ?, price = ?, shipping_cost = ?,
@@ -3247,6 +3323,12 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     };
   }
 
+  // A Best Offer listing over budget is judged as if bought for the full
+  // budget; the offer to make comes from the max-offer math further down.
+  const offerDeal = listing.deal_type !== "auction" &&
+    isOfferDeal(Number(listing.total_buy_cost), env, acceptsOffers(savedDetails.buyingOptions));
+  const purchaseCost = offerDeal ? getBuyBudget(env) : listing.total_buy_cost;
+
   const sellerRejectReason = getSellerRejectReason(listing, savedDetails) ||
     getUnverifiedConsoleReason(listing, savedDetails);
   if (sellerRejectReason) {
@@ -3300,10 +3382,10 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
   // Recheck against the verified, destination-specific buy cost from
   // enrichment before spending an AI call.
   const priceReason =
-    (listing.total_buy_cost > getBuyBudget(env)
+    (listing.total_buy_cost > getBuyBudget(env) && !offerDeal
       ? overBudgetClassification(listing.total_buy_cost, getBuyBudget(env)).reasoning
       : null) ||
-    getModelPriceRejectReason(listing.title, listing.category, listing.total_buy_cost);
+    getModelPriceRejectReason(listing.title, listing.category, purchaseCost);
   if (priceReason) {
     await env.DB.prepare(`
       UPDATE listings SET status = 'rejected', analysis_status = 'filtered',
@@ -3340,7 +3422,8 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     price: listing.price,
     inboundShipping: listing.shipping_cost,
     estimatedTax: listing.estimated_tax,
-    totalPurchaseCost: listing.total_buy_cost,
+    totalPurchaseCost: purchaseCost,
+    ...(offerDeal ? { askingTotal: listing.total_buy_cost, bestOffer: true } : {}),
     details: savedDetails,
   };
 
@@ -3416,7 +3499,7 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
   // BUY: a confirmed repair type, and a cost that clears the WATCH bar at
   // the asking-price estimate.
   const couldReachBuy = (isFlip || referencePartsCost !== null) &&
-    listing.total_buy_cost + partsCost <=
+    purchaseCost + partsCost <=
       maxViableBuyCost(comps.conservativeResale, listing.category);
   if (!modelResale && !analysis.reject && comps.count >= 3 && !comps.lowConfidence &&
       couldReachBuy) {
@@ -3453,7 +3536,7 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
       Math.max(
         5,
         ((100 - successProbability) / 100) *
-          listing.total_buy_cost *
+          purchaseCost *
           0.35
       )
     )
@@ -3464,14 +3547,14 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
       ebayFee -
       outboundShipping -
       packingCost -
-      listing.total_buy_cost -
+      purchaseCost -
       partsCost -
       riskReserve
   );
 
   const localProfit = roundMoney(
     localResale -
-      listing.total_buy_cost -
+      purchaseCost -
       partsCost -
       riskReserve -
       5
@@ -3485,7 +3568,7 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
   const thresholds = getDecisionThresholds(listing.category, getBuyBudget(env));
 
   const investment =
-    listing.total_buy_cost +
+    purchaseCost +
     partsCost +
     packingCost +
     (recommendedChannel === "eBay" ? outboundShipping : 5);
@@ -3518,8 +3601,9 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
 
   // An auction's price is today's bid and will rise. The max bid is the
   // highest bid that still makes the BUY profit and return within budget.
+  // A Best Offer listing over budget uses the same math for its max offer.
   const isAuction = listing.deal_type === "auction";
-  const auctionMaxBid = isAuction
+  const auctionMaxBid = isAuction || offerDeal
     ? getAuctionMaxBid({
         netForBuyAndProfit: recommendedChannel === "eBay"
           ? ebayResale - ebayFee - outboundShipping - packingCost - partsCost - riskReserve
@@ -3533,8 +3617,12 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
       })
     : null;
   const auctionHasRoom = !isAuction || auctionMaxBid >= Number(listing.price || 0) + 1;
+  const offerPlan = offerDeal
+    ? getBestOfferPlan({ maxOffer: auctionMaxBid, askingPrice: listing.price })
+    : null;
+  const offerHasRoom = !offerDeal || offerPlan.realistic;
 
-  if (meetsBuyMath && auctionHasRoom &&
+  if (meetsBuyMath && auctionHasRoom && offerHasRoom &&
       (buyBlockedBy.length === 0 || onlyMissingSoldReference)) {
     recommendation = "BUY";
     newStatus = "qualified";
@@ -3565,7 +3653,7 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
         localResale,
         localResaleRate: getLocalResaleRate(listing.category),
         outboundShipping,
-        purchaseCost: listing.total_buy_cost,
+        purchaseCost,
         partsCost,
         riskReserve,
         recommendedChannel,
@@ -3580,6 +3668,9 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
               bidCount: savedDetails.bidCount ?? null,
               endsAt: listing.item_end_date,
             }
+          : null,
+        bestOffer: offerDeal
+          ? { askingPrice: Number(listing.price || 0), maxOffer: auctionMaxBid }
           : null,
       }, thresholds.buyProfit);
     }
@@ -3619,11 +3710,12 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     Math.max(0, Number(listing.price || 0) * 0.8)
   );
 
-  // For an auction the "offer" is the most to bid.
+  // For an auction the "offer" is the most to bid; for an over-budget Best
+  // Offer listing it is the most to offer.
   const suggestedOffer =
     recommendation === "PASS"
       ? 0
-      : isAuction
+      : isAuction || offerDeal
         ? auctionMaxBid
         : Math.min(calculatedOffer, lowballCap);
 
@@ -3664,12 +3756,17 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
       : `${recommendation}: The likely issue is ${analysis.likelyIssue}. Repair difficulty is ${analysis.repairDifficulty}/10, risk is ${repairRisk}/10, and estimated repair success is ${successProbability}%. BagSpec found ${comps.count} valid working comparables and estimated resale at $${ebayResale.toFixed(2)} on eBay or $${localResale.toFixed(2)} locally. Estimated parts cost is $${partsCost.toFixed(2)}, producing an estimated ${recommendedChannel} profit of $${estimatedProfit.toFixed(2)} and an ROI of ${roiPercent.toFixed(1)}%.`;
 
   const claudeNote = verification ? ` Claude check: ${verification.reason}` : "";
-  const explanationWithLimits =
+  const offerNote = offerDeal && recommendation !== "PASS"
+    ? ` Asks $${Number(listing.price || 0).toFixed(2)} with Best Offer: profit assumes the seller accepts an offer up to $${auctionMaxBid.toFixed(2)}.` +
+      (offerPlan.realistic ? "" : ` That is under ${Math.round(BEST_OFFER_MIN_SHARE_OF_ASKING * 100)}% of the asking price, so it may be declined; WATCH only.`)
+    : "";
+  const explanationWithLimits = (
     recommendation === "WATCH" && buyBlockedBy.length && !verification
       ? `${finalExplanation} Not eligible for BUY: ${buyBlockedBy.join("; ")}.`
       : analysis.reject && analysis.rejectReason && recommendation === "PASS"
         ? `${finalExplanation} Rejected: ${analysis.rejectReason}.`
-        : finalExplanation + claudeNote;
+        : finalExplanation + claudeNote
+  ) + offerNote;
 
   const financialBreakdown = {
     dealType: listing.deal_type === "auction" ? "auction" : isFlip ? "flip" : "repair",
@@ -3685,7 +3782,9 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     comparableLowConfidence: comps.lowConfidence,
     comparablePriceSpread: comps.priceSpread || 0,
     comparablePrices: comps.prices.slice(0, 10),
-    purchaseCost: listing.total_buy_cost,
+    purchaseCost,
+    askingCost: listing.total_buy_cost,
+    offerDeal,
     estimatedPartsCost: partsCost,
     riskReserve,
     modelSoldReference: modelResale
@@ -3729,6 +3828,7 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
       repair_risk = ?,
       deal_score = ?,
       suggested_offer = ?,
+      offer_needed = ?,
       recommended_channel = ?,
       recommendation = ?,
       reasoning = ?,
@@ -3745,6 +3845,7 @@ async function analyzeNextCandidate(env, excludedCategories = []) {
     repairRisk,
     dealScore,
     suggestedOffer,
+    offerDeal ? 1 : 0,
     recommendedChannel,
     recommendation,
     JSON.stringify(financialBreakdown),

@@ -55,8 +55,11 @@ class DealDetailScreen extends StatelessWidget {
         ('Current bid', money(deal.price)),
         if (deal.suggestedOffer != null) ('Bid up to', money(deal.suggestedOffer)),
         if (deal.endsAt != null) ('Ends', '${MaterialLocalizations.of(context).formatShortDate(deal.endsAt!)} ${TimeOfDay.fromDateTime(deal.endsAt!).format(context)}'),
-      ] else
-        ('Price', money(deal.price)),
+      ] else ...[
+        (deal.offerNeeded ? 'Asking price' : 'Price', money(deal.price)),
+        if (deal.offerNeeded && deal.suggestedOffer != null)
+          ('Offer up to', money(deal.suggestedOffer)),
+      ],
       ('Shipping', money(deal.shipping)),
       ('Tax (est.)', money(deal.tax)),
       ('All-in cost', money(deal.totalBuyCost)),
