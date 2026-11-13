@@ -1690,9 +1690,14 @@ async function scanListings(env) {
         recentItems.splice(FLIP_LISTINGS_PER_SEARCH);
       }
 
+      // Most results were already saved by an earlier scan. D1 counts an
+      // INSERT OR IGNORE that skips a row as a row written, which used about
+      // 15,000-20,000 of the free 100,000 daily writes, so look the ids up
+      // first (one indexed read each) and insert only unseen listings.
+      const unseenItems = await filterUnseenItems(env, recentItems);
       let newForSearch = 0;
-      if (recentItems.length > 0) {
-        const statements = recentItems.map((item) => {
+      if (unseenItems.length > 0) {
+        const statements = unseenItems.map((item) => {
           // Auctions report their price as the current bid, not as price.
           const price = getListedPrice(item);
 
@@ -1924,6 +1929,20 @@ async function prefilterExisting(env) {
 // OR'd in, so every waiting row is read on each pass. Move rows that have
 // aged out of the 12-hour window (except auctions still running) out of
 // the queue so those reads stay proportional to live work.
+async function filterUnseenItems(env, items) {
+  const ids = [...new Set(items.map((item) => item.itemId).filter(Boolean))];
+  const known = new Set();
+  // D1 allows at most 100 bound parameters per query.
+  for (let start = 0; start < ids.length; start += 90) {
+    const chunk = ids.slice(start, start + 90);
+    const { results } = await env.DB.prepare(
+      `SELECT ebay_item_id FROM listings WHERE ebay_item_id IN (${chunk.map(() => "?").join(", ")})`
+    ).bind(...chunk).all();
+    for (const row of results) known.add(row.ebay_item_id);
+  }
+  return items.filter((item) => item.itemId && !known.has(item.itemId));
+}
+
 async function expireStaleCandidates(env) {
   const result = await env.DB.prepare(`
     UPDATE listings
