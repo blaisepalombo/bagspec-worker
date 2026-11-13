@@ -4346,17 +4346,43 @@ export async function findWorkingComparables(
   // cheapest were all just under the real floor and every one was thrown
   // out: 0 comparables for the commonest, best-selling models. When the
   // page was full and too little survived, search again from the real floor.
+  let items = first.items;
+  let best = result;
   if (result.count < 3 && first.total > first.items.length) {
     const second = await searchComparableListings(
       accessToken, query, categoryProfile, minimumComparablePrice);
-    return { ...select(second.items), searchRetriedAtFloor: true };
+    items = second.items;
+    best = { ...select(second.items), searchRetriedAtFloor: true };
   }
-  return result;
+  if (best.count < 3) return best;
+
+  // The category floor keeps straps and chargers out, but it also drops
+  // every real listing of a model that normally sells under it, leaving
+  // only overpriced asks: a $48 Nikon P90 was priced at $295. Look at the
+  // same model just under the floor; if it sells there at least as often,
+  // price it from both, so cheap models are priced as cheap models.
+  const lowFloor = Math.max(10, minimumComparablePrice * 0.3);
+  const below = await searchComparableListings(
+    accessToken, query, categoryProfile, lowFloor, minimumComparablePrice);
+  const belowFloor = selectComparables(below.items, {
+    originalWords, category, requiredModel, excludedItemId, searchQueries, minimumPrice: lowFloor,
+  });
+  if (belowFloor.count >= 3 && belowFloor.count >= best.count) {
+    return {
+      ...selectComparables([...below.items, ...items], {
+        originalWords, category, requiredModel, excludedItemId, searchQueries, minimumPrice: lowFloor,
+      }),
+      belowFloorMarket: true,
+      ...(best.searchRetriedAtFloor ? { searchRetriedAtFloor: true } : {}),
+    };
+  }
+  return best;
 }
 
 // One eBay search for working listings, cheapest first, priced at or above
-// priceFloor (eBay filters on item price without shipping).
-async function searchComparableListings(accessToken, query, categoryProfile, priceFloor) {
+// priceFloor and, when given, under priceCeiling (eBay filters on item price
+// without shipping).
+async function searchComparableListings(accessToken, query, categoryProfile, priceFloor, priceCeiling = null) {
   {
     const searchUrl = new URL(
       "https://api.ebay.com/buy/browse/v1/item_summary/search"
@@ -4381,7 +4407,7 @@ async function searchComparableListings(accessToken, query, categoryProfile, pri
       // Sorting by price would otherwise fill the results with accessories
       // and parts priced below any complete working unit. selectComparables
       // applies the exact floor to price plus shipping afterwards.
-      `conditions:{USED},itemLocationCountry:US,price:[${Math.floor(priceFloor)}..],priceCurrency:USD`
+      `conditions:{USED},itemLocationCountry:US,price:[${Math.floor(priceFloor)}..${priceCeiling ? Math.ceil(priceCeiling) : ""}],priceCurrency:USD`
     );
 
     const response = await fetch(searchUrl, {
@@ -4413,17 +4439,53 @@ async function searchComparableListings(accessToken, query, categoryProfile, pri
   }
 }
 
+// True when the title contains the model number (normalized: letters and
+// digits only) as a whole number: "p90" must not match "Coolpix P900" or
+// "P950", different cameras at several times the price. A digit that
+// directly continues the number means a different model; a space or hyphen
+// ends it ("P90 12.1MP" is a P90). Letters may follow ("T480s", "XM4").
+export function titleHasModel(title, modelToken) {
+  const token = String(modelToken || "").toLowerCase();
+  if (!token) return false;
+  let chars = "";
+  const gapBefore = [];
+  let gap = true;
+  for (const ch of String(title || "").toLowerCase()) {
+    if (/[a-z0-9]/.test(ch)) {
+      chars += ch;
+      gapBefore.push(gap);
+      gap = false;
+    } else {
+      gap = true;
+    }
+  }
+  gapBefore.push(true);
+  let from = 0;
+  for (;;) {
+    const at = chars.indexOf(token, from);
+    if (at === -1) return false;
+    const end = at + token.length;
+    const joinsBefore = at > 0 && !gapBefore[at] && /\d/.test(chars[at - 1]) && /\d/.test(token[0]);
+    const joinsAfter = end < chars.length && !gapBefore[end] && /\d/.test(chars[end]) && /\d/.test(token.at(-1));
+    if (!joinsBefore && !joinsAfter) return true;
+    from = at + 1;
+  }
+}
+
 // Pure matching step: decides which eBay results are the same working
 // device as the listing and turns their prices into a resale estimate.
+// minimumPrice defaults to the category's floor; the below-floor check in
+// findWorkingComparables passes a lower one.
 export function selectComparables(itemSummaries, {
   originalWords,
   category = "",
   requiredModel = null,
   excludedItemId = null,
   searchQueries = [],
+  minimumPrice = null,
 }) {
   const categoryProfile = getCategoryProfile(category);
-  const minimumComparablePrice = getMinimumComparablePrice(category);
+  const minimumComparablePrice = minimumPrice ?? getMinimumComparablePrice(category);
 
   const normalize = (value) =>
     String(value || "")
@@ -4582,7 +4644,7 @@ export function selectComparables(itemSummaries, {
         !requiredCategoryPattern.test(title) &&
         !(
           strongestModelToken &&
-          normalizedTitle.includes(strongestModelToken)
+          titleHasModel(title, strongestModelToken)
         )
       ) {
         return false;
@@ -4591,7 +4653,7 @@ export function selectComparables(itemSummaries, {
       // Require the strongest exact model number when available.
       if (
         strongestModelToken &&
-        !normalizedTitle.includes(strongestModelToken)
+        !titleHasModel(title, strongestModelToken)
       ) {
         return false;
       }
