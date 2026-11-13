@@ -136,7 +136,7 @@ export default {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store",
           "X-Content-Type-Options": "nosniff",
-          "Content-Security-Policy": "default-src 'self'; img-src 'self' https://i.ebayimg.com data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+          "Content-Security-Policy": "default-src 'self'; img-src 'self' https://i.ebayimg.com data:; style-src 'unsafe-inline'; script-src 'unsafe-inline' https://static.cloudflareinsights.com; connect-src 'self' https://cloudflareinsights.com; base-uri 'none'; frame-ancestors 'none'",
         },
       });
     }
@@ -2219,6 +2219,24 @@ async function requeueInvalidScreenings(env) {
   return { queued: Number(result.meta?.changes || 0) };
 }
 
+// Queue counts for the Operations tab: listings waiting for analysis now,
+// plus BUY/WATCH history. Both halves use an index; counting the whole
+// listings table instead read 30,000-130,000 rows on every dashboard load,
+// which alone could use up D1's free 5M daily row reads. Expired candidates
+// keep analysis_status = 'details_ready', so status must be checked too.
+const DASHBOARD_QUEUE_SQL = `
+  SELECT category, analysis_status, recommendation, COUNT(*) AS count
+  FROM listings
+  WHERE status = 'candidate' AND analysis_status = 'details_ready'
+  GROUP BY category, analysis_status, recommendation
+  UNION ALL
+  SELECT category, analysis_status, recommendation, COUNT(*) AS count
+  FROM listings
+  WHERE recommendation IN ('BUY', 'WATCH')
+  GROUP BY category, analysis_status, recommendation
+  ORDER BY 1, 2, 3
+`;
+
 async function getPublicDashboardDiagnostics(env) {
   const [scans, cycles, queue] = await Promise.all([
     env.DB.prepare(`
@@ -2229,17 +2247,7 @@ async function getPublicDashboardDiagnostics(env) {
       SELECT started_at, completed_at, status, summary
       FROM cycle_runs ORDER BY id DESC LIMIT 8
     `).all(),
-    env.DB.prepare(`
-      SELECT category, analysis_status, recommendation, COUNT(*) AS count
-      FROM listings
-      WHERE id IN (
-        SELECT id FROM listings WHERE analysis_status = 'details_ready'
-        UNION
-        SELECT id FROM listings WHERE recommendation IN ('BUY', 'WATCH')
-      )
-      GROUP BY category, analysis_status, recommendation
-      ORDER BY category, analysis_status, recommendation
-    `).all(),
+    env.DB.prepare(DASHBOARD_QUEUE_SQL).all(),
   ]);
 
   return {
@@ -2262,13 +2270,7 @@ async function getDiagnostics(env) {
         SELECT started_at, completed_at, status, summary, error
         FROM cycle_runs ORDER BY id DESC LIMIT 12
       `).all(),
-      env.DB.prepare(`
-        SELECT category, analysis_status, recommendation,
-               COUNT(*) AS count
-        FROM listings
-        GROUP BY category, analysis_status, recommendation
-        ORDER BY category, analysis_status, recommendation
-      `).all(),
+      env.DB.prepare(DASHBOARD_QUEUE_SQL).all(),
       env.DB.prepare(`
         SELECT category, recommendation, COUNT(*) AS count
         FROM listings
@@ -2336,7 +2338,9 @@ async function getDiagnostics(env) {
                json_extract(reasoning, '$.estimatedPartsCost') AS parts_cost,
                json_extract(reasoning, '$.repairSuccessProbability') AS success_probability
         FROM listings
-        WHERE analysis_status = 'complete'
+        -- "+" keeps SQLite walking newest ids first and stopping after 8
+        -- matches; the analysis_status index made it read ~40,000 rows.
+        WHERE +analysis_status = 'complete'
           AND COALESCE(json_extract(reasoning, '$.comparisonSearchQuery'), '') <> ''
         ORDER BY id DESC LIMIT 8
       `).all(),

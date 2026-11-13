@@ -363,8 +363,9 @@ export function renderDashboard() {
     const results=await Promise.allSettled([read('/deals'),read('/listings'),read('/diagnostics'),loadInventory()]);
     if (results[0].status==='fulfilled') { state.deals=results[0].value.deals || []; state.nextBefore=results[0].value.nextBefore || null; }
     if (results[1].status==='fulfilled') state.listings=results[1].value.listings || [];
+    const staleParts=['deals','listings'].filter((name,i) => results[i].status==='fulfilled' && results[i].value.stale);
     const staleCopy=results.slice(0,2).find(x => x.status==='fulfilled' && x.value.stale);
-    state.stale=staleCopy ? staleCopy.value.savedAt : null;
+    state.stale=staleCopy ? { at: staleCopy.value.savedAt, what: staleParts.join(' and ') } : null;
     if (results[2].status==='fulfilled') state.diagnostics=results[2].value;
     const scan=state.diagnostics?.recentScans?.[0], cycle=state.diagnostics?.recentCycles?.[0];
     $('m-deals').textContent=results[0].status==='fulfilled' ? String(state.deals.length) : '—';
@@ -374,7 +375,7 @@ export function renderDashboard() {
     const fresh=cycleTime && Date.now()-cycleTime.getTime() < 15*60*1000;
     $('m-cycle').textContent=cycle ? (cycle.status === 'completed' && fresh ? 'Running' : 'Check') : '—'; $('m-cycle-time').textContent=cycle ? 'Last cycle ' + when(cycle.completed_at || cycle.started_at) : 'Cycle data unavailable';
     const failures=results.filter(x => x.status==='rejected').length;
-    $('load-state').textContent=state.stale ? 'Database unavailable · showing saved deals from ' + when(state.stale) : failures ? failures + ' data source' + (failures===1 ? '' : 's') + ' unavailable' : 'Live data loaded';
+    $('load-state').textContent=state.stale ? 'Database unavailable · showing saved ' + state.stale.what + ' from ' + when(state.stale.at) : failures ? failures + ' data source' + (failures===1 ? '' : 's') + ' unavailable' : 'Live data loaded';
     $('updated').textContent='Updated ' + new Intl.DateTimeFormat(undefined,{hour:'numeric',minute:'2-digit'}).format(new Date());
     $('refresh').disabled=false; render();
   }
