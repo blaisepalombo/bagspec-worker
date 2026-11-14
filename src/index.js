@@ -1,3 +1,10 @@
+import {
+  countEbayCall,
+  fetchEbayRateLimits,
+  flushEbayCallCounts,
+  getEbayUsage,
+  usageWarning,
+} from "./ebay-usage.js";
 import { renderDashboard } from "./dashboard.js";
 import { ensureInventoryTable, handleInventoryRequest } from "./inventory.js";
 import {
@@ -75,6 +82,13 @@ export default {
           status: 401,
           headers: quiet ? {} : { "WWW-Authenticate": 'Basic realm="BagSpec Admin"' },
         });
+      }
+      if (request.method === "GET" && url.pathname === "/api/ebay/rate-limits") {
+        try {
+          return Response.json(await getEbayUsage(env, await getEbayToken(env)));
+        } catch (error) {
+          return Response.json({ error: "eBay usage check failed", details: error.message }, { status: 502 });
+        }
       }
       return handleEbayAccountRequest(request, env, url);
     }
@@ -1787,6 +1801,7 @@ async function scanListings(env) {
             : `conditionIds:{7000},itemLocationCountry:US,price:[..${repairMaxPrice}],priceCurrency:USD`
       );
 
+      countEbayCall("search");
       const response = await fetch(ebayUrl, {
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -2193,6 +2208,14 @@ async function runAutomatedCycle(env) {
     console.error("Database clean-up failed", error);
   }
 
+  // Save this run's eBay call counts (one small write per kind).
+  let ebayCalls = 0;
+  try {
+    ebayCalls = await flushEbayCallCounts(env);
+  } catch (error) {
+    console.error("Could not save eBay call counts", error);
+  }
+
   const errors = Object.entries(result)
     .filter(([, value]) =>
       /failed/i.test(value.status || "") ||
@@ -2217,6 +2240,7 @@ async function runAutomatedCycle(env) {
       analyzed: result.analysis?.completed || 0,
       filtered: result.analysis?.filtered || 0,
       alerted: result.alerts?.sent || 0,
+      ebayCalls,
     }),
     errors.join(" | ").slice(0, 1000) || null,
     cycleId
@@ -2916,10 +2940,11 @@ export function getLocalDigestClock(now = new Date(), timeZone = DIGEST_TIME_ZON
   return { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) };
 }
 
-export function buildWatchDigestPayload(rows, localDate) {
+export function buildWatchDigestPayload(rows, localDate, usageNote = null) {
+  const warning = usageNote ? `\n⚠️ ${usageNote} Scanning stops for the day if it runs out.` : "";
   if (!rows.length) {
     return {
-      content: `📋 **BagSpec daily digest (${localDate})**: no near-deals in the last 24 hours. Still scanning.`,
+      content: `📋 **BagSpec daily digest (${localDate})**: no near-deals in the last 24 hours. Still scanning.` + warning,
     };
   }
   const lines = rows.map((row, index) => {
@@ -2935,7 +2960,7 @@ export function buildWatchDigestPayload(rows, localDate) {
       (row.recommendation === "BUY" ? " • **BUY**" : "");
   });
   return {
-    content: `📋 **BagSpec daily digest (${localDate})**: top near-deals from the last 24 hours`,
+    content: `📋 **BagSpec daily digest (${localDate})**: top near-deals from the last 24 hours` + warning,
     embeds: [{
       description: truncateDiscord(lines.join("\n\n"), 4000),
       color: 0xf1c40f,
@@ -2970,8 +2995,17 @@ export async function sendDailyWatchDigest(env, now = new Date()) {
     LIMIT ?
   `).bind(DIGEST_SIZE).all();
 
+  // A warning line when eBay usage is high, so it shows before eBay starts
+  // refusing calls. A failed check never blocks the digest.
+  let usageNote = null;
+  try {
+    const usage = await fetchEbayRateLimits(await getEbayToken(env), { fresh: true });
+    usageNote = usage.available ? usageWarning(usage.main) : null;
+  } catch (error) {
+    console.error("eBay usage check for the digest failed", error);
+  }
   if (env.DISCORD_WEBHOOK_URL) {
-    await postDiscordWebhook(env, buildWatchDigestPayload(rows, clock.date));
+    await postDiscordWebhook(env, buildWatchDigestPayload(rows, clock.date, usageNote));
   }
   // Phones that turned the digest on get a one-line summary; tapping it
   // opens the best deal.
@@ -3137,6 +3171,7 @@ async function enrichCandidates(env, limit = 10) {
           "https://api.ebay.com/buy/browse/v1/item/" +
           encodeURIComponent(listing.ebay_item_id);
 
+        countEbayCall("item");
         const response = await fetch(itemUrl, {
           headers: {
             Authorization: `Bearer ${accessToken}`,
@@ -4609,6 +4644,7 @@ async function searchComparableListings(accessToken, query, categoryProfile, pri
       `conditions:{USED},itemLocationCountry:US,price:[${Math.floor(priceFloor)}..${priceCeiling ? Math.ceil(priceCeiling) : ""}],priceCurrency:USD`
     );
 
+    countEbayCall("comparables");
     const response = await fetch(searchUrl, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -5082,6 +5118,7 @@ async function getSoldEvidence(env, category, comps) {
 
   const accessToken = await getEbayToken(env);
   const sales = (await Promise.all(sample.map(async (item) => {
+    countEbayCall("sold");
     const response = await fetch(
       "https://api.ebay.com/buy/browse/v1/item/" + encodeURIComponent(item.itemId),
       {
