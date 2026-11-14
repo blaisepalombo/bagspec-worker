@@ -2091,13 +2091,50 @@ async function filterUnseenItems(env, items) {
   return items.filter((item) => item.itemId && !known.has(item.itemId));
 }
 
-async function expireStaleCandidates(env) {
+// A listing stays in the queue until the later of 12 hours after eBay listed
+// it and 4 hours after BagSpec found it. Expiring 12 hours after listing
+// alone gave late-found listings (often flips, found 7-10 hours after
+// listing) only 2-5 hours, and about 70 a day expired without a verdict.
+export const LISTING_FRESH_HOURS = 12;
+export const MIN_QUEUE_HOURS = 4;
+// When the listing leaves the queue, as a julianday.
+const QUEUE_DEADLINE_SQL = `MAX(
+  COALESCE(julianday(item_creation_date), julianday(first_seen_at)) + ${LISTING_FRESH_HOURS} / 24.0,
+  julianday(first_seen_at) + ${MIN_QUEUE_HOURS} / 24.0
+)`;
+// Still in the queue `margin` from now (an SQLite modifier such as
+// '+30 minutes'). Written as two plain comparisons so the queue index on
+// item_creation_date still helps.
+function stillQueuedSql(margin = "+0 minutes") {
+  return `(
+    item_creation_date >= datetime('now', '-${LISTING_FRESH_HOURS} hours', '${margin}')
+    OR first_seen_at >= datetime('now', '-${MIN_QUEUE_HOURS} hours', '${margin}')
+    OR (deal_type = 'auction' AND julianday(item_end_date) > julianday('now', '+5 minutes'))
+  )`;
+}
+// Ranking for the enrichment and analysis queues. Listings within 3 hours
+// of leaving the queue jump ahead (earliest deadline first), so the working
+// flips (score 25, below repairs at 30-60) are analyzed before they expire
+// instead of waiting behind every newer repair.
+const QUEUE_RANK_SQL = `
+  deal_score + CASE
+    WHEN deal_type = 'auction' THEN 30
+    WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
+    ELSE 8
+  END + CASE
+    WHEN deal_type != 'auction' AND ${QUEUE_DEADLINE_SQL} < julianday('now', '+3 hours') THEN 40
+    ELSE 0
+  END DESC,
+  ${QUEUE_DEADLINE_SQL} ASC`;
+
+export async function expireStaleCandidates(env) {
   const result = await env.DB.prepare(`
     UPDATE listings
     SET status = 'expired'
     WHERE status = 'candidate'
       AND analysis_status IN ('awaiting_details', 'details_ready')
-      AND item_creation_date < datetime('now', '-12 hours')
+      AND item_creation_date < datetime('now', '-${LISTING_FRESH_HOURS} hours')
+      AND first_seen_at < datetime('now', '-${MIN_QUEUE_HOURS} hours')
       AND NOT (
         deal_type = 'auction'
         AND COALESCE(julianday(item_end_date), 0) > julianday('now', '+5 minutes')
@@ -3070,16 +3107,9 @@ async function enrichCandidates(env, limit = 10) {
     WHERE
       status = 'candidate'
       AND analysis_status = 'awaiting_details'
-      AND (item_creation_date >= datetime('now', '-12 hours') OR (deal_type = 'auction' AND julianday(item_end_date) > julianday('now', '+5 minutes')))
+      AND ${stillQueuedSql('+30 minutes')}
       AND price * ? <= ?
-    ORDER BY
-      deal_score + CASE
-        WHEN deal_type = 'auction' THEN 30
-        WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
-        WHEN item_creation_date >= datetime('now', '-12 hours') THEN 8
-        ELSE 0
-      END DESC,
-      item_creation_date DESC
+    ORDER BY ${QUEUE_RANK_SQL}
     LIMIT 180
   `).bind(1 + SALES_TAX_RATE, getBestOfferCeiling(env)).all();
 
@@ -3244,7 +3274,7 @@ async function enrichCandidates(env, limit = 10) {
       WHERE
         status = 'candidate'
         AND analysis_status = 'awaiting_details'
-        AND (item_creation_date >= datetime('now', '-12 hours') OR (deal_type = 'auction' AND julianday(item_end_date) > julianday('now', '+5 minutes')))
+        AND ${stillQueuedSql('+30 minutes')}
     `).first();
 
     return {
@@ -3298,15 +3328,8 @@ export async function loadAnalysisQueue(env) {
     WHERE
       status = 'candidate'
       AND analysis_status = 'details_ready'
-      AND (item_creation_date >= datetime('now', '-12 hours') OR (deal_type = 'auction' AND julianday(item_end_date) > julianday('now', '+5 minutes')))
-    ORDER BY
-      deal_score + CASE
-        WHEN deal_type = 'auction' THEN 30
-        WHEN item_creation_date >= datetime('now', '-1 hour') THEN 20
-        WHEN item_creation_date >= datetime('now', '-12 hours') THEN 8
-        ELSE 0
-      END DESC,
-      item_creation_date DESC
+      AND ${stillQueuedSql()}
+    ORDER BY ${QUEUE_RANK_SQL}
     LIMIT 180
   `).all();
   return results;
@@ -4481,10 +4504,7 @@ export async function findWorkingComparables(
   const accessToken = await getEbayToken(env);
   const categoryProfile = getCategoryProfile(category);
 
-  const originalWords = String(searchQuery || "")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
+  const originalWords = cleanComparableWords(searchQuery);
   const query = buildComparableSearchQuery(originalWords, category);
   const searchQueries = [query];
   const minimumComparablePrice = getMinimumComparablePrice(category);
@@ -4508,13 +4528,32 @@ export async function findWorkingComparables(
   // page was full and too little survived, search again from the real floor.
   let items = first.items;
   let best = result;
+  let activeQuery = query;
   if (result.count < 3 && first.total > first.items.length) {
     const second = await searchComparableListings(
       accessToken, query, categoryProfile, minimumComparablePrice);
     items = second.items;
     best = { ...select(second.items), searchRetriedAtFloor: true };
   }
-  if (best.count < 3) return best;
+  // Too few: try once more with just the brand and model (or the first
+  // words when there is no model number). "Too few comparables" was the
+  // top reason working flips got no verdict, often from long titles such
+  // as "Razer Barracuda X Wired Headset USB" that few listings repeat.
+  // Matching still uses the full title, so the model number still has to
+  // match.
+  if (best.count < 3) {
+    const broader = buildBroaderComparableQuery(originalWords, category);
+    if (!broader || searchQueries.includes(broader)) return best;
+    searchQueries.push(broader);
+    const retry = await searchComparableListings(
+      accessToken, broader, categoryProfile, minimumComparablePrice * 0.85);
+    const retried = select(retry.items);
+    if (retried.count <= best.count) return { ...best, searchQueriesTried: searchQueries };
+    items = retry.items;
+    activeQuery = broader;
+    best = { ...retried, searchRetriedBroader: true };
+    if (best.count < 3) return best;
+  }
 
   // The category floor keeps straps and chargers out, but it also drops
   // every real listing of a model that normally sells under it, leaving
@@ -4523,7 +4562,7 @@ export async function findWorkingComparables(
   // price it from both, so cheap models are priced as cheap models.
   const lowFloor = Math.max(10, minimumComparablePrice * 0.3);
   const below = await searchComparableListings(
-    accessToken, query, categoryProfile, lowFloor, minimumComparablePrice);
+    accessToken, activeQuery, categoryProfile, lowFloor, minimumComparablePrice);
   const belowFloor = selectComparables(below.items, {
     originalWords, category, requiredModel, excludedItemId, searchQueries, minimumPrice: lowFloor,
   });
@@ -5103,6 +5142,60 @@ function soldEvidenceReference(query, row) {
 // Words right after a model number that make it a different, differently
 // priced product: TI-84 Plus CE vs TI-84 Plus, 3DS XL vs 3DS, Switch Lite.
 const MODEL_VARIANT_WORD = /^(?:plus|\+|ce|se|xl|ll|lite|pro|max|mini|ultra)$/i;
+
+// Seller titles carry words that no other listing repeats, and eBay treats
+// parentheses as an OR group: "📷Fujifilm FinePix XP70", "Nintendo DS Lite
+// Noble Pink Japan", "Nintendo DS Lite Handheld System (USG-JPN-1)". Removes
+// emoji and symbols, colors, regions, filler, and bracketed seller codes,
+// while keeping a model number inside brackets ("(WH-1000XM4)").
+const COMPARABLE_NOISE_WORD = new RegExp("^(?:" + [
+  // Colors and finishes
+  "black|white|silver|gold|gray|grey|pink|red|blue|green|purple|yellow|orange|rose|navy|teal|charcoal|graphite|midnight|noble|matte|glossy",
+  // Regions
+  "japan|japanese|jpn|jp|usa|us|uk|eu|euro|european|import|imported|region|pal|ntsc(?:[-/]?[a-z/]*)?",
+  // Filler
+  // ("series", "edition", "system" and "original" stay: Xbox Series X,
+  // PS5 Digital Edition, Nintendo Entertainment System, Original Xbox.)
+  "with|w|and|tested|works|working|work|great|good|excellent|nice|clean|condition|handheld|version|bundle|only|wired|wireless|usb|free|shipping|fast|oem|genuine|authentic",
+].join("|") + ")$", "i");
+// A bracketed seller code or note to drop whole: a region, a long digit run
+// (stock numbers like EPJ033664; model codes such as SCPH-30001 are
+// shorter), or a condition note.
+const BRACKETED_NOISE = /(?:jpn|japan|usa|\bus\b|\buk\b|\beu\b|\d{6,}|tested|works|read|see|please|\bnew\b|\bused\b)/i;
+
+export function cleanComparableWords(text) {
+  const withoutNoisyBrackets = String(text || "")
+    .replace(/[([{]([^)\]}]*)[)\]}]/g, (match, inner) =>
+      BRACKETED_NOISE.test(inner) ? " " : ` ${inner} `);
+  const cleaned = withoutNoisyBrackets
+    // Keep letters, digits and the joiners model names use (TI-84, 3DS+, 1.4).
+    .replace(/[^\p{L}\p{N}\s\-+.']/gu, " ")
+    .split(/\s+/)
+    .map((word) => word.replace(/^[-.']+|[-.']+$/g, ""))
+    .filter((word) => word && !COMPARABLE_NOISE_WORD.test(word));
+  return cleaned.length ? cleaned : String(text || "").trim().split(/\s+/).filter(Boolean);
+}
+
+// Words that describe the kind of product, not which product it is.
+const GENERIC_PRODUCT_WORD =
+  /^(?:headset|headphones?|earbuds|speaker|camera|digital|console|laptop|calculator|graphing|projector|portable|bluetooth|waterproof)$/i;
+
+// The broader second try: the brand and the model with its variant words
+// ("Nintendo 3DS XL", "Fujifilm S2980"). Without a model number, only the
+// generic words are dropped ("Razer Barracuda X Headset" -> "Razer
+// Barracuda X"); cutting to the first words would turn "Xbox Series X"
+// into "Xbox Series" and price it from the cheaper Series S.
+export function buildBroaderComparableQuery(words, category) {
+  const query = buildComparableSearchQuery(words, category);
+  const queryWords = query.split(/\s+/).filter(Boolean);
+  const modelIndex = queryWords.findIndex((word, index) =>
+    index >= 1 && /[a-z]/i.test(word) && /\d/.test(word) &&
+    !/^(?:i[3579]|m[1357]|ryzen\d?|xeon)\d*/i.test(word) && !/^\d+(?:gb|tb)/i.test(word));
+  const broader = modelIndex >= 1
+    ? [queryWords[0], ...queryWords.slice(modelIndex)].join(" ")
+    : queryWords.filter((word) => !GENERIC_PRODUCT_WORD.test(word)).join(" ");
+  return broader && broader !== query ? broader : null;
+}
 
 export function buildComparableSearchQuery(words, category) {
   const clean = words.filter((word) =>
