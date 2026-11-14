@@ -77,6 +77,13 @@ export function renderDashboard(buyBudget = 50) {
     .list-row .numbers { color:var(--muted); white-space:nowrap; font-size:13px; text-align:right; }
     .panel { padding:18px; margin-top:12px; }
     .panel h3 { margin:0 0 12px; font-size:17px; }
+    .usage-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 12px; }
+    .usage-head strong { font-size:22px; }
+    .usage-bar { height:8px; border-radius:4px; background:var(--line); overflow:hidden; margin:10px 0 8px; }
+    .usage-bar span { display:block; height:100%; background:var(--accent); }
+    .usage-bar span.high { background:var(--warn); }
+    .usage-bar span.full { background:var(--red); }
+    .usage-warn { color:var(--warn); margin:6px 0 0; }
     .runs { display:grid; }
     .run { display:grid; grid-template-columns:160px 1fr 135px; gap:12px; border-top:1px solid var(--line); padding:10px 0; font-size:13px; color:var(--muted); }
     .run strong { color:var(--ink); font-weight:600; overflow-wrap:anywhere; }
@@ -122,7 +129,7 @@ export function renderDashboard(buyBudget = 50) {
     <div class="section-top"><h2>Results</h2><span class="caution" id="load-state" role="status" aria-live="polite"></span></div>
     <div class="controls"><div class="tabs" role="tablist" aria-label="Dashboard sections"><button id="tab-deals" class="tab active" data-tab="deals" type="button" role="tab" aria-controls="deals" aria-selected="true" tabindex="0">Deals</button><button id="tab-listings" class="tab" data-tab="listings" type="button" role="tab" aria-controls="listings" aria-selected="false" tabindex="-1">New listings</button><button id="tab-flips" class="tab" data-tab="flips" type="button" role="tab" aria-controls="flips" aria-selected="false" tabindex="-1">My flips</button><button id="tab-operations" class="tab" data-tab="operations" type="button" role="tab" aria-controls="operations" aria-selected="false" tabindex="-1">Operations</button></div><label class="visually-hidden" for="search">Search titles and categories</label><input id="search" class="input" type="search" placeholder="Search titles and categories" autocomplete="off"><label class="visually-hidden" for="sort">Sort results</label><select id="sort" class="select"><option value="newest">Newest first</option><option value="score">Highest score</option><option value="profit">Projected profit</option></select></div>
     <div id="chips" class="chips" role="group" aria-label="Filter by category"></div>
-    <section id="deals" class="cards" role="tabpanel" aria-labelledby="tab-deals" tabindex="0"></section><section id="listings" class="list" role="tabpanel" aria-labelledby="tab-listings" tabindex="0" hidden></section><section id="flips" role="tabpanel" aria-labelledby="tab-flips" tabindex="0" hidden></section><section id="operations" role="tabpanel" aria-labelledby="tab-operations" tabindex="0" hidden><div class="panel"><h3>Recent cycles</h3><div id="runs" class="runs"></div></div><div class="panel"><h3>Queue by category</h3><div id="queue" class="runs"></div></div></section>
+    <section id="deals" class="cards" role="tabpanel" aria-labelledby="tab-deals" tabindex="0"></section><section id="listings" class="list" role="tabpanel" aria-labelledby="tab-listings" tabindex="0" hidden></section><section id="flips" role="tabpanel" aria-labelledby="tab-flips" tabindex="0" hidden></section><section id="operations" role="tabpanel" aria-labelledby="tab-operations" tabindex="0" hidden><div class="panel" id="usage-panel" hidden><h3>eBay API today</h3><div id="usage"></div></div><div class="panel"><h3>Recent cycles</h3><div id="runs" class="runs"></div></div><div class="panel"><h3>Queue by category</h3><div id="queue" class="runs"></div></div></section>
     <p class="foot">Only items up to $${budget} all-in are shown. A BUY needs matching comparables, a known no-solder repair, at least $25 profit and a 50% return, and Claude's final check. Resale estimates come from asking prices, so check eBay sold listings before buying. For auctions, "Bid up to" is the most to bid. Listings that accept offers may ask up to $${Math.round(budget * 1.4)}; "Offer up to" is the most to offer, and the deal only works if the seller accepts. The scanner runs every 5 minutes even when this page is closed.</p>
   </main>
 </div>
@@ -192,7 +199,32 @@ export function renderDashboard(buyBudget = 50) {
       return '<div class="list-row"><span class="tag ' + (x.recommendation === 'PASS' ? 'pass' : 'watch') + '">' + label + '</span><div class="item"><strong>' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + title + '</a>' : title) + '</strong><small>' + esc(kind(x)) + ' · ' + esc(x.category || 'Other') + ' · ' + esc(when(x.first_seen_at)) + '</small></div><div class="numbers">' + money(x.total_buy_cost) + '<br>Score ' + esc(x.deal_score ?? '—') + '</div></div>';
     }).join('') : empty('No matching listings','Try clearing the search or category filter.');
   }
+  // eBay's own count of today's Browse API calls (owner only), with
+  // BagSpec's count by kind as a cross-check.
+  function renderUsage() {
+    const u = state.ebayUsage;
+    $('usage-panel').hidden = !u;
+    if (!u) return;
+    const n = v => Number(v || 0).toLocaleString('en-US');
+    const main = u.ebay?.available ? u.ebay.main : null;
+    let html = '';
+    if (main) {
+      const pct = main.limit ? Math.min(100, Math.round(main.used / main.limit * 100)) : 0;
+      const reset = main.reset ? new Date(main.reset) : null;
+      const resetText = reset && !isNaN(reset) ? 'resets ' + reset.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }) : '';
+      html += '<div class="usage-head"><strong>' + n(main.used) + ' / ' + n(main.limit) + '</strong><span class="hint">' + n(main.remaining) + ' left' + (resetText ? ' · ' + esc(resetText) : '') + (main.projected ? ' · on pace for ~' + n(main.projected) : '') + '</span></div>';
+      html += '<div class="usage-bar" role="img" aria-label="' + pct + '% of the eBay calls for today used"><span class="' + (pct >= 95 ? 'full' : pct >= 85 ? 'high' : '') + '" style="width:' + pct + '%"></span></div>';
+    } else {
+      html += '<p class="hint">The eBay usage numbers are unavailable: ' + esc(u.ebay?.reason || 'unknown error') + '</p>';
+    }
+    if (u.warning) html += '<p class="usage-warn">' + esc(u.warning) + '</p>';
+    const own = u.own || {};
+    const line = (label, day) => day ? '<div class="run"><span>' + label + '</span><strong>' + n(day.total) + ' calls</strong><span>' + n(day.search) + ' search · ' + n(day.item) + ' details · ' + n(day.comparables) + ' comps · ' + n(day.sold) + ' sold</span></div>' : '';
+    html += line("BagSpec's count today", own.today) + line('Yesterday', own.yesterday);
+    $('usage').innerHTML = html;
+  }
   function renderOperations() {
+    renderUsage();
     const d=state.diagnostics || {};
     $('runs').innerHTML = (d.recentCycles || []).slice(0,8).map(x => { let summary={}; try {summary=JSON.parse(x.summary || '{}');} catch {} return '<div class="run"><span>' + esc(when(x.started_at)) + '</span><strong>' + esc(x.status || 'Unknown') + (x.error ? ' · ' + esc(x.error) : '') + '</strong><span>' + esc(summary.newListings ?? '—') + ' new · ' + esc(summary.alerted ?? '—') + ' alerts</span></div>'; }).join('') || empty('No cycle history','Diagnostics are unavailable or scans have not run yet.');
     $('queue').innerHTML = (d.queue || []).filter(x => x.analysis_status === 'details_ready' || x.recommendation === 'BUY' || x.recommendation === 'WATCH').map(x => '<div class="run"><span>' + esc(x.category || 'Other') + '</span><strong>' + esc(x.analysis_status || '') + ' · ' + esc(x.recommendation || '') + '</strong><span>' + esc(x.count || 0) + ' listings</span></div>').join('') || empty('Queue is clear','No current ready items were reported.');
@@ -252,6 +284,10 @@ export function renderDashboard(buyBudget = 50) {
       const e = await fetch('/api/ebay/status', { cache:'no-store', headers:{ 'X-BagSpec-Quiet':'1' } });
       state.ebay = e.ok ? await e.json() : null;
     } catch { state.ebay = null; }
+    try {
+      const u = await fetch('/api/ebay/rate-limits', { cache:'no-store', headers:{ 'X-BagSpec-Quiet':'1' } });
+      state.ebayUsage = u.ok ? await u.json() : null;
+    } catch { state.ebayUsage = null; }
   }
   function ebayPanel() {
     const e = state.ebay;
