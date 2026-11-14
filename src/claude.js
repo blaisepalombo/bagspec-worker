@@ -133,6 +133,8 @@ export function validateVerdict(value) {
   return value;
 }
 
+export { buildUserMessage as buildUserMessageForTest };
+
 function buildUserMessage(context, minimumProfit) {
   const listing = context.listing || {};
   const details = listing.details || {};
@@ -150,6 +152,10 @@ function buildUserMessage(context, minimumProfit) {
       totalBuyCost: context.purchaseCost,
       itemSpecifics: details.itemSpecifics || {},
       returnsAccepted: details.returnsAccepted ?? null,
+      // Seller and photo facts for the scam check (null on older listings).
+      seller: details.seller || null,
+      photoCount: details.imageCount ?? null,
+      bagspecWarningSigns: listing.scamFlags || [],
       description: description.slice(0, MAX_DESCRIPTION_CHARS),
       descriptionTruncated: description.length > MAX_DESCRIPTION_CHARS,
     },
