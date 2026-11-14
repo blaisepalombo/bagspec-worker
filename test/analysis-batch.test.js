@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadAnalysisQueue, runBalancedBatch, takeFromAnalysisQueue } from "../src/index.js";
+import {
+  loadAnalysisQueue,
+  MAX_ANALYSIS_ATTEMPTS,
+  REJECTED_BEFORE_ANALYSIS,
+  runBalancedBatch,
+  takeFromAnalysisQueue,
+} from "../src/index.js";
 
 // A fake queue that behaves like analyzeNextCandidate: best listing first,
 // skipping excluded categories.
@@ -34,6 +40,54 @@ test("stops when the queue is empty and respects the limit", async () => {
 
   const empty = fakeQueue([]);
   assert.equal((await runBalancedBatch(6, empty.next)).length, 0);
+});
+
+// Like fakeQueue, but listings whose title starts with "reject" come back as
+// rule rejections.
+function fakeQueueWithRejections(items) {
+  const queue = items.map(([category, title], i) => ({ id: i + 1, category, title }));
+  const next = async (excluded) => {
+    const index = queue.findIndex((item) => !excluded.includes(item.category));
+    if (index === -1) return { status: "No enriched candidates are waiting for analysis" };
+    const [listing] = queue.splice(index, 1);
+    return listing.title.startsWith("reject")
+      ? { status: REJECTED_BEFORE_ANALYSIS, listing }
+      : { status: "Analysis completed", listing };
+  };
+  return { next, queue };
+}
+
+test("rule rejections don't use up analysis slots", async () => {
+  const items = [];
+  for (let i = 0; i < 10; i += 1) {
+    items.push(["Cameras", "reject " + i], ["Cameras", "real " + i]);
+  }
+  const { next } = fakeQueueWithRejections(items);
+  const results = await runBalancedBatch(6, next);
+  const completed = results.filter((r) => r.status === "Analysis completed");
+  const rejected = results.filter((r) => r.status === REJECTED_BEFORE_ANALYSIS);
+  assert.equal(completed.length, 6, "still six real analyses");
+  assert.equal(rejected.length, 6);
+});
+
+test("a rejection doesn't use up its category's first turn", async () => {
+  const { next } = fakeQueueWithRejections([
+    ["Cameras", "reject a"], ["Game Consoles", "real b"], ["Cameras", "real c"], ["Cameras", "real d"],
+  ]);
+  const results = await runBalancedBatch(2, next);
+  assert.deepEqual(
+    results.filter((r) => r.status === "Analysis completed").map((r) => r.listing.category),
+    ["Game Consoles", "Cameras"]
+  );
+});
+
+test("a long run of rejections stops at the attempt cap", async () => {
+  const { next, queue } = fakeQueueWithRejections(
+    Array.from({ length: MAX_ANALYSIS_ATTEMPTS + 10 }, (_, i) => ["Cameras", "reject " + i])
+  );
+  const results = await runBalancedBatch(6, next);
+  assert.equal(results.length, MAX_ANALYSIS_ATTEMPTS);
+  assert.equal(queue.length, 10);
 });
 
 test("an analysis error ends the batch and is reported", async () => {
