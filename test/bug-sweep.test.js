@@ -44,7 +44,7 @@ test("Operations queue counts only live candidates and BUY/WATCH history", async
   many(1, "Cameras", "analyzed", "complete", "BUY");
   many(40, "Cameras", "rejected", "complete", "PASS");
 
-  const body = await (await worker.fetch(new Request("https://bagspec.com/diagnostics"), { DB: fakeD1(db) })).json();
+  const body = await (await worker.fetch(new Request("https://bagspec.com/diagnostics", { headers: { Authorization: "Basic " + btoa("bagspec:admin-key") } }), { DB: fakeD1(db), BAGSPEC_ADMIN_KEY: "admin-key" })).json();
   const count = (status, rec) => body.queue.find((q) => q.analysis_status === status && q.recommendation === rec)?.count;
   assert.equal(count("details_ready", "REVIEW"), 3);
   assert.equal(count("complete", "WATCH"), 2);

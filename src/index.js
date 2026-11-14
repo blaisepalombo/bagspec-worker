@@ -136,22 +136,21 @@ export default {
     }
 
     const authorized = isAuthorized(request, env);
-    const publicDashboardRoutes = new Set([
-      "/dashboard", "/deals", "/listings", "/diagnostics",
-    ]);
-
-    if ((!publicDashboardRoutes.has(url.pathname) || request.method !== "GET") && !authorized) {
+    // Everything past here needs the owner login. Only the dashboard page
+    // itself loads signed out, and it holds no data: it asks to sign in.
+    if (!(url.pathname === "/dashboard" && request.method === "GET") && !authorized) {
+      // The dashboard asks quietly, so a signed-out visitor sees its sign-in
+      // screen instead of a password pop-up.
+      const quiet = request.headers.get("X-BagSpec-Quiet") === "1";
       return new Response("BagSpec login required", {
         status: 401,
-        headers: {
-          "WWW-Authenticate": 'Basic realm="BagSpec Admin"',
-        },
+        headers: quiet ? {} : { "WWW-Authenticate": 'Basic realm="BagSpec Admin"' },
       });
     }
 
     // Signing in here lets the dashboard load the private "My flips" data.
     if (url.pathname === "/login") {
-      return Response.redirect(url.origin + "/dashboard#flips", 302);
+      return Response.redirect(url.origin + "/dashboard", 302);
     }
 
     if (url.pathname === "/dashboard") {
@@ -283,9 +282,7 @@ export default {
 
     if (url.pathname === "/diagnostics") {
       try {
-        return Response.json(authorized
-          ? await getDiagnostics(env)
-          : await getPublicDashboardDiagnostics(env));
+        return Response.json(await getDiagnostics(env));
       } catch (error) {
         return Response.json(
           { error: "Diagnostics failed", details: error.message },
@@ -326,7 +323,7 @@ export default {
       // Every BUY and WATCH stays in the history, newest first, 100 per page.
       // Pass ?before=<id> (the previous page's nextBefore) for older deals.
       const before = Number(url.searchParams.get("before")) || null;
-      return savedJsonResponse(`deals-${authorized ? "admin" : "public"}`, !before, async () => {
+      return savedJsonResponse("deals-admin", !before, async () => {
       await ensureRuntimeTables(env);
       await ensureInventoryTable(env);
       const { results } = await env.DB.prepare(`
@@ -368,13 +365,13 @@ export default {
       return {
         count: page.length,
         nextBefore: results.length > DEALS_PAGE_SIZE ? page[page.length - 1].id : null,
-        deals: authorized ? page : page.map(({ reasoning, ...deal }) => deal),
+        deals: page,
       };
       });
     }
 
     if (url.pathname === "/listings") {
-      return savedJsonResponse(`listings-${authorized ? "admin" : "public"}`, true, async () => {
+      return savedJsonResponse("listings-admin", true, async () => {
       await ensureRuntimeTables(env);
       const { results } = await env.DB.prepare(`
         SELECT
@@ -402,7 +399,7 @@ export default {
 
       return {
         count: results.length,
-        listings: authorized ? results : results.map(({ reasoning, ...listing }) => listing),
+        listings: results,
       };
       });
     }
@@ -2507,27 +2504,6 @@ const DASHBOARD_QUEUE_SQL = `
   GROUP BY category, analysis_status, recommendation
   ORDER BY 1, 2, 3
 `;
-
-async function getPublicDashboardDiagnostics(env) {
-  const [scans, cycles, queue] = await Promise.all([
-    env.DB.prepare(`
-      SELECT started_at, completed_at, status, listings_found, new_listings
-      FROM scan_runs ORDER BY id DESC LIMIT 8
-    `).all(),
-    env.DB.prepare(`
-      SELECT started_at, completed_at, status, summary
-      FROM cycle_runs ORDER BY id DESC LIMIT 8
-    `).all(),
-    env.DB.prepare(DASHBOARD_QUEUE_SQL).all(),
-  ]);
-
-  return {
-    recentScans: scans.results,
-    recentCycles: cycles.results,
-    queue: queue.results,
-  };
-}
-
 async function getDiagnostics(env) {
   await ensureRuntimeTables(env);
   const [recentScans, recentCycles, queue, recentDecisions, aiUsage,
