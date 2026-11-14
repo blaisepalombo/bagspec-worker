@@ -567,16 +567,43 @@ const V2_SEARCHES = [
 // Run /setup-v2 after changing V2_SEARCHES so the searches table matches.
 // Rotate model-specific terms across scans to reach items whose titles omit
 // generic words such as "console" or "speaker".
+//
+// Terms are chosen from scan_search_stats (new listings per eBay call,
+// Oct 20 - Nov 14, 2026). Working-item searches keep only the 15 cheapest
+// fresh results, so model terms there find 1-5 new listings per call. Terms
+// that found under ~0.25 per call (switch lite, nintendo 3ds, sonos,
+// soundbar, benq projector) are dropped.
 const SEARCH_TERMS = {
   "Business Laptops": ["laptop", "macbook", "thinkpad", "surface laptop"],
-  // Under $50 the consoles that fit are Nintendo handhelds, whose hinge,
-  // shell, screen and stick repairs need no soldering.
-  "Game Consoles": ["nintendo 3ds", "nintendo ds", "switch lite", "nintendo switch", "game boy", "psp", "console"],
+  "Game Consoles": ["console", "nintendo switch", "nintendo ds", "game boy", "psp"],
   "Graphing Calculators": ["ti-84 plus ce", "ti-84 plus", "ti-nspire cx", "graphing calculator"],
   Headphones: ["headphones", "sony wh-1000xm", "bose quietcomfort", "airpods max"],
-  "Premium Audio": ["speaker", "sonos", "soundlink", "soundbar"],
-  Projectors: ["projector", "epson projector", "benq projector"],
+  "Premium Audio": ["speaker", "soundlink"],
+  Projectors: ["projector", "epson projector"],
   Cameras: ["camera", "canon eos", "sony alpha", "nikon camera", "fujifilm camera"],
+};
+// Broken-item searches see every for-parts listing within 200 results, so
+// the broad term already catches nearly everything: model terms found
+// 0.02-0.17 new listings per call there, against 3-4 for the broad term.
+// Only terms finding about 0.3 or more per call are kept, so the broad term
+// runs far more often.
+// Under $50 the consoles that fit are mostly Nintendo handhelds, whose
+// hinge, shell, screen and stick repairs need no soldering.
+const REPAIR_SEARCH_TERMS = {
+  "Business Laptops": ["laptop", "thinkpad"],
+  "Game Consoles": ["console", "nintendo ds", "game boy"],
+  "Graphing Calculators": ["graphing calculator"],
+  Headphones: ["headphones"],
+  "Premium Audio": ["speaker"],
+  Projectors: ["projector"],
+  Cameras: ["camera", "nikon camera"],
+};
+// Whole-category auction searches for these categories found 0.14-0.2 new
+// listings per call, so they run on one turn in three.
+const AUCTION_EVERY_TURNS = {
+  "Graphing Calculators": 3,
+  "Premium Audio": 3,
+  Projectors: 3,
 };
 // Selling locally avoids shipping, packing, and return risk, so prefer the
 // local channel unless eBay nets meaningfully more.
@@ -832,9 +859,21 @@ function getModelPriceRejectReason(title, category, buyCost) {
     "ceiling where even a free repair could reach WATCH";
 }
 
-function getSearchTerm(search, scanSlot) {
+export { REPAIR_SEARCH_TERMS, SEARCH_TERMS };
+
+// The auction search for this cycle, rotating through categories, or null
+// when it is a low-yield category's skipped turn.
+export function pickAuctionSearch(searches, scanSlot) {
+  if (!searches.length) return null;
+  const search = searches[(scanSlot + 3) % searches.length];
+  const turn = Math.floor((scanSlot + 3) / searches.length);
+  const every = AUCTION_EVERY_TURNS[search.profile_key || search.category || search.name] || 1;
+  return turn % every === 0 ? search : null;
+}
+
+export function getSearchTerm(search, scanSlot, termLists = SEARCH_TERMS) {
   const category = search.profile_key || search.category || search.name;
-  const terms = SEARCH_TERMS[category];
+  const terms = termLists[category];
   return terms ? terms[scanSlot % terms.length] : search.query;
 }
 
@@ -1651,21 +1690,21 @@ async function scanListings(env) {
     // when the cadence and the number of terms share a factor.
     const searchTasks = searches.filter(isDue).map((search) => ({
       search,
-      query: getSearchTerm(search, Math.floor(scanSlot / scanEvery(search))),
+      query: getSearchTerm(search, Math.floor(scanSlot / scanEvery(search)), REPAIR_SEARCH_TERMS),
       dealType: "repair",
     }));
     // One additional rotating niche query per cycle increases coverage
     // without doubling Browse API usage.
     const rotatingSearches = searches.filter((search) => {
       const category = search.profile_key || search.category || search.name;
-      return (SEARCH_TERMS[category] || []).length > 1 &&
+      return (REPAIR_SEARCH_TERMS[category] || []).length > 1 &&
         (getCategoryProfile(category)?.scanEveryMinutes || 5) <= 10;
     });
     if (rotatingSearches.length) {
       const search = rotatingSearches[scanSlot % rotatingSearches.length];
       const ownSlot = Math.floor(scanSlot / scanEvery(search));
-      const query = getSearchTerm(search, ownSlot + 1);
-      if (query !== getSearchTerm(search, ownSlot)) {
+      const query = getSearchTerm(search, ownSlot + 1, REPAIR_SEARCH_TERMS);
+      if (query !== getSearchTerm(search, ownSlot, REPAIR_SEARCH_TERMS)) {
         searchTasks.push({ search, query, dealType: "repair" });
       }
     }
@@ -1680,12 +1719,15 @@ async function scanListings(env) {
       });
       // One broken-item auction search per cycle for auctions ending soon,
       // where cheap deals happen. Offset so it rotates apart from flips.
-      const auctionSearch = searches[(scanSlot + 3) % searches.length];
-      searchTasks.push({
-        search: auctionSearch,
-        query: getSearchTerm(auctionSearch, Math.floor(scanSlot / searches.length) + 1),
-        dealType: "auction",
-      });
+      // Low-yield categories take only some of their turns.
+      const auctionSearch = pickAuctionSearch(searches, scanSlot);
+      if (auctionSearch) {
+        searchTasks.push({
+          search: auctionSearch,
+          query: getSearchTerm(auctionSearch, Math.floor(scanSlot / searches.length) + 1),
+          dealType: "auction",
+        });
+      }
       // Every other cycle, one Best Offer search for listings just over
       // budget whose sellers may accept less.
       if (scanSlot % BEST_OFFER_SEARCH_EVERY_CYCLES === 0) {
@@ -2136,6 +2178,7 @@ async function runAutomatedCycle(env) {
       newListings: result.scan?.newListings || 0,
       enriched: result.enrichment?.enriched || 0,
       analyzed: result.analysis?.completed || 0,
+      filtered: result.analysis?.filtered || 0,
       alerted: result.alerts?.sent || 0,
     }),
     errors.join(" | ").slice(0, 1000) || null,
@@ -2151,12 +2194,21 @@ const NOTHING_TO_ANALYZE = "No enriched candidates are waiting for analysis";
 // category starves, then fills the rest of the batch with the best listings
 // left from any category. Stopping after one per category left cameras and
 // consoles, most of the queue, to expire unanalyzed (110-420 listings a day).
-export async function runBalancedBatch(limit, analyzeNext, onError = () => {}) {
+//
+// Rule rejections ("Listing rejected before analysis") make no outside calls,
+// so they don't count toward `limit`; in busy hours they used up about a
+// third of the slots. `maxAttempts` caps the total so a long run of
+// rejections still ends the batch.
+export const REJECTED_BEFORE_ANALYSIS = "Listing rejected before analysis";
+export const MAX_ANALYSIS_ATTEMPTS = 25;
+
+export async function runBalancedBatch(limit, analyzeNext, onError = () => {}, maxAttempts = MAX_ANALYSIS_ATTEMPTS) {
   const results = [];
   const usedCategories = [];
   let oneEach = true;
+  let counted = 0;
 
-  while (results.length < limit) {
+  while (counted < limit && results.length < maxAttempts) {
     let result;
     try {
       result = await analyzeNext(oneEach ? usedCategories : []);
@@ -2175,6 +2227,9 @@ export async function runBalancedBatch(limit, analyzeNext, onError = () => {}) {
     }
 
     results.push(result);
+    // A rejected listing doesn't use up its category's turn either.
+    if (result.status === REJECTED_BEFORE_ANALYSIS) continue;
+    counted += 1;
     if (result.listing?.category) usedCategories.push(result.listing.category);
   }
   return results;
@@ -2199,7 +2254,7 @@ async function analyzeCandidateBatch(env, limit = 3) {
       (result) => result.status === "Analysis completed"
     ).length,
     filtered: results.filter(
-      (result) => result.status === "Listing rejected before analysis"
+      (result) => result.status === REJECTED_BEFORE_ANALYSIS
     ).length,
     failed: results.filter(
       (result) => result.status === "Analysis failed"
