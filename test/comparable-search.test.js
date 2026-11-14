@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildComparableSearchQuery, findWorkingComparables, titleHasModel } from "../src/index.js";
+import { buildBroaderComparableQuery, buildComparableSearchQuery, cleanComparableWords, findWorkingComparables, titleHasModel } from "../src/index.js";
 
 const words = (text) => text.split(/\s+/);
 
@@ -99,10 +99,59 @@ test("model numbers match whole numbers only", () => {
   assert.equal(titleHasModel("Nikon P900 and P90 bundle", "p90"), true, "a later whole match still counts");
 });
 
-test("a rare model with few listings is not searched twice", async () => {
+test("a rare model with few listings is not searched again at the floor, only once broader", async () => {
   const searches = fakeEbay({ saturated: false });
   const result = await findWorkingComparables(env, "Texas Instruments TI-83 Plus graphing calculator", "Graphing Calculators");
-  assert.equal(searches.length, 1, "no second search when eBay had nothing more");
+  assert.deepEqual(searches.map((s) => s.q), ["Texas Instruments TI-83 Plus", "Texas TI-83 Plus"],
+    "no floor retry when eBay had nothing more; one broader try");
   assert.equal(result.count, 0);
   assert.equal(result.searchRetriedAtFloor, undefined);
+  assert.equal(result.searchRetriedBroader, undefined, "the broader try found no more, so the first result stands");
+});
+
+test("seller titles are cleaned before searching for comparables", () => {
+  const query = (title, category) => buildComparableSearchQuery(cleanComparableWords(title), category);
+  assert.equal(query("📷Fujifilm FinePix XP70 Waterproof Digital Camera Blue", "Cameras"), "Fujifilm FinePix XP70");
+  assert.equal(query("Nintendo DS Lite Noble Pink Japan", "Game Consoles"), "Nintendo DS Lite");
+  assert.equal(query("Razer Barracuda X White/Gray Wired Headset USB", "Headphones"), "Razer Barracuda X Headset");
+  // eBay reads parentheses as an OR group; seller codes inside are dropped.
+  assert.equal(query("onn Large Rugged Speaker with Bluetooth (EPJ033664)", "Premium Audio"), "onn Large Rugged Speaker Bluetooth");
+  assert.doesNotMatch(query("Nintendo DS Lite Handheld System (USG-JPN-1)", "Game Consoles"), /[()]|JPN/);
+  // A model number inside brackets is kept, without the brackets.
+  assert.equal(query("Sony Headphones (WH-1000XM4) Black", "Headphones"), "Sony Headphones WH-1000XM4");
+  assert.equal(query("Sony PlayStation 2 Slim (SCPH-90001) Console", "Game Consoles"), "Sony PlayStation 2 Slim SCPH-90001");
+  // Words that make a different product stay.
+  assert.equal(query("Microsoft Xbox Series X 1TB Console", "Game Consoles"), "Microsoft Xbox Series X");
+  assert.equal(query("Texas Instruments TI-84 Plus CE graphing calculator", "Graphing Calculators"), "Texas Instruments TI-84 Plus CE");
+  assert.deepEqual(cleanComparableWords("🎧📷"), ["🎧📷"], "never empty");
+});
+
+test("the broader retry is brand plus model, or the title without generic words", () => {
+  const broader = (title, category) => buildBroaderComparableQuery(cleanComparableWords(title), category);
+  assert.equal(broader("Fujifilm FinePix S Series S2980 14MP Digital Camera", "Cameras"), "Fujifilm S2980");
+  assert.equal(broader("🎧Sony Noise Canceling Headphones MDR-10RNC", "Headphones"), "Sony MDR-10RNC");
+  assert.equal(broader("Razer Barracuda X White/Gray Wired Headset USB", "Headphones"), "Razer Barracuda X");
+  assert.equal(broader("Microsoft Xbox Series X 1TB Console", "Game Consoles"), null, "never cut to Xbox Series");
+  assert.equal(broader("Nintendo 3DS XL handheld console", "Game Consoles"), null, "already as broad as it gets");
+});
+
+test("too few comparables are searched again with brand and model", async () => {
+  const searches = [];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/oauth2/token")) return Response.json({ access_token: "app", expires_in: 7200 });
+    const q = url.searchParams.get("q");
+    searches.push(q);
+    if (/price:\[\d+\.\.\d+\]/.test(url.searchParams.get("filter"))) return Response.json({ total: 0, itemSummaries: [] });
+    if (q !== "Sony MDR-10RNC") return Response.json({ total: 0, itemSummaries: [] });
+    return Response.json({ total: 6, itemSummaries: [45, 48, 50, 52, 55, 60].map((price, i) => ({
+      itemId: `v1|${i}|0`, title: `Sony MDR-10RNC Noise Cancelling Headphones ${i}`, condition: "Used",
+      buyingOptions: ["FIXED_PRICE"], price: { value: String(price) }, shippingOptions: [{ shippingCost: { value: "0.00" } }],
+    })) });
+  };
+  const result = await findWorkingComparables(env, "🎧Sony Noise Canceling Headphones MDR-10RNC", "Headphones");
+  assert.deepEqual(searches.slice(0, 2), ["Sony Noise Canceling Headphones MDR-10RNC", "Sony MDR-10RNC"]);
+  assert.equal(result.searchRetriedBroader, true);
+  assert.ok(result.count >= 3, `found ${result.count}`);
+  assert.deepEqual(result.searchQueriesTried, ["Sony Noise Canceling Headphones MDR-10RNC", "Sony MDR-10RNC"]);
 });
