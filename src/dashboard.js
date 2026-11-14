@@ -77,6 +77,8 @@ export function renderDashboard(buyBudget = 50) {
     .list-row .numbers { color:var(--muted); white-space:nowrap; font-size:13px; text-align:right; }
     .panel { padding:18px; margin-top:12px; }
     .panel h3 { margin:0 0 12px; font-size:17px; }
+    main.locked > :not(.hero):not(#signin) { display:none !important; }
+    #signin p { color:var(--muted); margin:0 0 14px; }
     .usage-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 12px; }
     .usage-head strong { font-size:22px; }
     .usage-bar { height:8px; border-radius:4px; background:var(--line); overflow:hidden; margin:10px 0 8px; }
@@ -125,6 +127,7 @@ export function renderDashboard(buyBudget = 50) {
   <header><a class="brand" href="/dashboard" aria-label="BagSpec dashboard">BagSpec</a><div class="header-right"><span class="status"><span class="dot" aria-hidden="true"></span>Scanner runs every 5 minutes</span><button class="btn" id="refresh" type="button">Refresh data</button></div></header>
   <main id="main">
     <div class="hero"><div><div class="eyebrow">eBay repair scanner</div><h1>Dashboard</h1><p class="sub">Review new listings and scanner results. Check every listing yourself before buying.</p></div><p class="hero-note" id="updated">Loading data…</p></div>
+    <section id="signin" class="panel" hidden><h3>Sign in to see BagSpec</h3><p>Deals, listings and your flips are private.</p><a class="btn primary" href="/login">Sign in</a></section>
     <section class="metrics" aria-label="Scanner summary"><div class="metric"><small>Deals shown</small><strong id="m-deals">—</strong><em>BUY and WATCH history</em></div><div class="metric"><small>Listings shown</small><strong id="m-listings">—</strong><em>Latest 100 listings</em></div><div class="metric"><small>New in latest scan</small><strong id="m-new">—</strong><em id="m-scan-time">Waiting for data</em></div><div class="metric"><small>Scanner status</small><strong id="m-cycle">—</strong><em id="m-cycle-time">Waiting for data</em></div></section>
     <div class="section-top"><h2>Results</h2><span class="caution" id="load-state" role="status" aria-live="polite"></span></div>
     <div class="controls"><div class="tabs" role="tablist" aria-label="Dashboard sections"><button id="tab-deals" class="tab active" data-tab="deals" type="button" role="tab" aria-controls="deals" aria-selected="true" tabindex="0">Deals</button><button id="tab-listings" class="tab" data-tab="listings" type="button" role="tab" aria-controls="listings" aria-selected="false" tabindex="-1">New listings</button><button id="tab-flips" class="tab" data-tab="flips" type="button" role="tab" aria-controls="flips" aria-selected="false" tabindex="-1">My flips</button><button id="tab-operations" class="tab" data-tab="operations" type="button" role="tab" aria-controls="operations" aria-selected="false" tabindex="-1">Operations</button></div><label class="visually-hidden" for="search">Search titles and categories</label><input id="search" class="input" type="search" placeholder="Search titles and categories" autocomplete="off"><label class="visually-hidden" for="sort">Sort results</label><select id="sort" class="select"><option value="newest">Newest first</option><option value="score">Highest score</option><option value="profit">Projected profit</option></select></div>
@@ -394,10 +397,20 @@ export function renderDashboard(buyBudget = 50) {
     renderChips(); if (state.tab === 'flips') $('chips').hidden = true;
     renderDeals(); renderListings(); renderFlips(); renderOperations();
   }
-  async function read(path) { const r=await fetch(path,{cache:'no-store'}); if (!r.ok) throw new Error(path + ' returned ' + r.status); return r.json(); }
+  async function read(path) { const r=await fetch(path,{cache:'no-store',headers:{'X-BagSpec-Quiet':'1'}}); if (!r.ok) { const e=new Error(path + ' returned ' + r.status); e.status=r.status; throw e; } return r.json(); }
+  // Signed out: show only the sign-in screen.
+  function showLocked(locked) {
+    $('main').classList.toggle('locked', locked);
+    $('signin').hidden = !locked;
+    $('refresh').hidden = locked;
+    if (locked) $('updated').textContent = 'Signed out';
+  }
   async function refresh() {
     $('refresh').disabled=true; $('load-state').textContent='Updating…';
     const results=await Promise.allSettled([read('/deals'),read('/listings'),read('/diagnostics'),loadInventory()]);
+    const locked=results[0].status==='rejected' && results[0].reason?.status===401;
+    showLocked(locked);
+    if (locked) { $('refresh').disabled=false; return; }
     if (results[0].status==='fulfilled') { state.deals=results[0].value.deals || []; state.nextBefore=results[0].value.nextBefore || null; }
     if (results[1].status==='fulfilled') state.listings=results[1].value.listings || [];
     const staleParts=['deals','listings'].filter((name,i) => results[i].status==='fulfilled' && results[i].value.stale);

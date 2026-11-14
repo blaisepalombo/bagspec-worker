@@ -43,7 +43,10 @@ function seededEnv(dealCount) {
   return { DB: fakeD1(db) };
 }
 
-const get = (env, path) => worker.fetch(new Request("https://bagspec.com" + path), env);
+// The dashboard data needs the owner login.
+const ADMIN = { Authorization: "Basic " + btoa("bagspec:admin-key") };
+const get = (env, path) => worker.fetch(new Request("https://bagspec.com" + path, { headers: ADMIN }),
+  { ...env, BAGSPEC_ADMIN_KEY: "admin-key" });
 
 // Schema setup runs once per Worker instance, as in production, so the
 // tests share one database.
@@ -56,7 +59,7 @@ test("/deals pages through every BUY and WATCH, newest first", async () => {
   for (let pages = 0; path && pages < 10; pages++) {
     const body = await (await get(env, path)).json();
     seen.push(...body.deals.map((deal) => deal.id));
-    assert.ok(body.deals.every((deal) => !("reasoning" in deal)), "public view hides reasoning");
+    assert.ok(body.deals.every((deal) => "reasoning" in deal), "the signed-in view includes reasoning");
     path = body.nextBefore ? "/deals?before=" + body.nextBefore : null;
   }
   assert.equal(seen.length, 230);
