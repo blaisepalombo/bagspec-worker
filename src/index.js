@@ -3198,6 +3198,15 @@ async function enrichCandidates(env, limit = 10) {
           returnPeriod: item.returnTerms?.returnPeriod || null,
           returnShippingCostPayer:
             item.returnTerms?.returnShippingCostPayer || null,
+          // For the scam checks.
+          seller: item.seller
+            ? {
+                feedbackScore: item.seller.feedbackScore ?? null,
+                feedbackPercentage: item.seller.feedbackPercentage ?? null,
+                accountType: item.seller.sellerAccountType || null,
+              }
+            : null,
+          imageCount: (item.image?.imageUrl ? 1 : 0) + (item.additionalImages || []).length,
         };
 
         return {
@@ -3559,6 +3568,17 @@ async function analyzeNextCandidate(env, excludedCategories = [], queue = null) 
     analysis.rejectReason = tooCheapReason;
   }
 
+  const scamCheck = getScamCheck({ listing, details: savedDetails, comps, isFlip });
+  if (!analysis.reject && scamCheck.hardReason) {
+    analysis.reject = true;
+    analysis.rejectReason = scamCheck.hardReason;
+  } else if (!analysis.reject && scamCheck.points >= SCAM_PASS_POINTS) {
+    analysis.reject = true;
+    analysis.rejectReason = `Likely scam or not as described: ${scamCheck.flags.join(", ")}`;
+  }
+  // Claude's BUY check sees the same warning signs.
+  if (scamCheck.flags.length) listingData.scamFlags = scamCheck.flags;
+
   const repairEvidence = getSellerEvidence(listing, savedDetails);
   const referencePartsCost = isFlip
     ? 0
@@ -3612,6 +3632,8 @@ async function analyzeNextCandidate(env, excludedCategories = [], queue = null) 
   if (!modelResale) buyBlockedBy.push("no sold-price reference for this model");
   if (referencePartsCost === null)
     buyBlockedBy.push("repair type is unconfirmed or has no parts-price reference");
+  if (scamCheck.points >= SCAM_BLOCK_POINTS)
+    buyBlockedBy.push(`scam warning signs: ${scamCheck.flags.join(", ")}`);
   const localResale = roundMoney(
     ebayResale * getLocalResaleRate(listing.category)
   );
@@ -3869,6 +3891,7 @@ async function analyzeNextCandidate(env, excludedCategories = [], queue = null) 
     referencePartsCost,
     partsReferenceChecked: REPAIR_PARTS_CHECKED,
     buyBlockedBy,
+    scamFlags: scamCheck.flags,
     comparisonSearchQuery: analysis.comparisonSearchQuery,
     searchQueriesTried: comps.searchQueriesTried || [],
     comparableCount: comps.count,
@@ -4060,6 +4083,89 @@ function getClaudeDailyLimit(env) {
   const raw = String(env.CLAUDE_DAILY_CALL_LIMIT ?? "").trim();
   const limit = Number(raw);
   return raw && Number.isInteger(limit) && limit >= 0 ? limit : DAILY_VERIFICATION_LIMIT;
+}
+
+// Scam checks for deals. In production the flips that reached WATCH or BUY
+// included five $50-80 "AirPods Max" with no returns and a description
+// that only repeated the title (two sellers listed theirs twice), and a
+// camera mainboard listed as a working camera. Signals come from data the
+// item lookup already returns, so the checks make no extra eBay calls.
+export const SCAM_BLOCK_POINTS = 2; // at most WATCH, with the reasons shown
+export const SCAM_PASS_POINTS = 5;  // passed as a likely scam
+
+// Asking to pay or talk outside eBay removes eBay's buyer protection.
+const OFF_EBAY_PAYMENT =
+  /\b(?:zelle|venmo|cash\s?app|western union|money\s?gram|wire transfer|gift cards?|whats\s?app|telegram|paypal\s+(?:friends|f\s?&\s?f|family))\b/;
+// A working-item listing that is really a box, a picture or a part.
+const NOT_THE_DEVICE =
+  // ("motherboard" alone is not enough: "laptop with new motherboard".)
+  /\b(?:box only|empty box|box and manual only|replica|dummy|picture of|photo of|image of|replacement parts?|(?:main\s?board|motherboard|logic board|pcb)\s+(?:only|replacement))\b/;
+const STOCK_PHOTO =
+  /\b(?:stock (?:photo|image|picture)s?|(?:photos?|pictures?|images?) (?:are |is )?(?:for|just for) (?:reference|illustration)|not (?:the )?actual (?:item|photos?|pictures?|images?)|generic (?:photo|image|picture)s?)\b/;
+const CONTACT_DETAILS =
+  /[\w.+-]+@[\w-]+\.[a-z]{2,}|\(?\b\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/i;
+
+const plainText = (value) => String(value || "")
+  .replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, " ")
+  .replace(/<[^>]*>/g, " ")
+  .replace(/&(?:nbsp|amp|quot|#39);/gi, " ")
+  .replace(/\s+/g, " ")
+  .trim()
+  .toLowerCase();
+
+export function getScamCheck({ listing, details = {}, comps = null, isFlip = false }) {
+  const title = plainText(listing.title);
+  const description = plainText([details.shortDescription, details.conditionDescription,
+    details.fullDescription].filter(Boolean).join(" "));
+
+  if (OFF_EBAY_PAYMENT.test(description)) {
+    return { hardReason: "Seller mentions paying or talking outside eBay, which removes buyer protection", points: 0, flags: [] };
+  }
+  if (!isFlip) return { hardReason: null, points: 0, flags: [] };
+  if (NOT_THE_DEVICE.test(title)) {
+    return { hardReason: "Listing is for a box, picture or part, not a working device", points: 0, flags: [] };
+  }
+
+  const flags = [];
+  let points = 0;
+  const flag = (weight, text) => { points += weight; flags.push(text); };
+
+  const seller = details.seller || {};
+  const feedbackScore = seller.feedbackScore === null || seller.feedbackScore === undefined
+    ? null : Number(seller.feedbackScore);
+  const feedbackPercentage = seller.feedbackPercentage === null || seller.feedbackPercentage === undefined
+    ? null : Number(seller.feedbackPercentage);
+  if (feedbackScore !== null && feedbackScore < 10) {
+    flag(2, `new seller (${feedbackScore} feedback)`);
+  } else if (feedbackPercentage !== null && feedbackPercentage < 97) {
+    flag(1, `seller feedback is ${feedbackPercentage}%`);
+  }
+
+  // Nothing written beyond the title (often pasted as both the summary and
+  // the description).
+  const descriptionWords = (title ? description.split(title).join(" ") : description)
+    .replace(/[^a-z0-9]+/g, " ").trim();
+  if (descriptionWords.length < 30) flag(2, "the description only repeats the title");
+
+  if (Number.isFinite(details.imageCount) && details.imageCount <= 1) flag(1, "only one photo");
+  if (STOCK_PHOTO.test(description)) flag(2, "the seller says the photos are not of the actual item");
+  if (CONTACT_DETAILS.test(description)) flag(1, "the description lists a phone number or email");
+  const trustProblem = flags.length > 0;
+
+  // Private sellers often take no returns, so alone it is only a small sign.
+  if (details.returnsAccepted === false) flag(1, "no returns");
+
+  // Asking prices run high, so real deals are often 25-50% of them too: a
+  // low price counts only alongside a trust problem above.
+  const prices = comps?.prices || [];
+  if (trustProblem && prices.length >= 3) {
+    const lowerQuartile = prices[Math.floor((prices.length - 1) * 0.25)];
+    const share = Number(listing.total_buy_cost) / lowerQuartile;
+    if (lowerQuartile > 0 && share < 0.7) {
+      flag(2, `priced at ${Math.round(share * 100)}% of what working ones ask`);
+    }
+  }
+  return { hardReason: null, points, flags };
 }
 
 // A working flip asking under half of the comparables lower quartile.
