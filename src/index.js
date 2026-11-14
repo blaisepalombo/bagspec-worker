@@ -651,6 +651,7 @@ const AUCTION_LISTINGS_PER_SEARCH = 40;
 const BEST_OFFER_BUDGET_MULTIPLIER = 1.4;
 const BEST_OFFER_MIN_SHARE_OF_ASKING = 0.75;
 const BEST_OFFER_SEARCH_EVERY_CYCLES = 2;
+export const FLIP_SEARCH_EVERY_CYCLES = 3;
 // Daily cap on Claude BUY checks (about 1-3 cents each with claude-sonnet-5-5).
 // Override with the CLAUDE_DAILY_CALL_LIMIT variable.
 const DAILY_VERIFICATION_LIMIT = 10;
@@ -797,8 +798,10 @@ const REPAIR_EVIDENCE = {
   missing_storage: /\b(?:no|missing|without)\s+(?:ssd|hdd|hard\s*drive|storage|drive)\b/,
   missing_ram: /\b(?:no|missing|without)\s+(?:ram|memory)\b/,
   missing_storage_and_ram: /\b(?:no|missing|without)\s+(?:ram|memory)\b[\s\S]*\b(?:ssd|hdd|hard\s*drive|storage|drive)\b|\b(?:no|missing|without)\s+(?:ssd|hdd|hard\s*drive|storage|drive)\b[\s\S]*\b(?:ram|memory)\b/,
-  battery: statedFault("batter(?:y|ies)"),
-  charger: /\b(?:no|missing|without)\s+(?:charger|power\s+(?:adapter|cord)|ac\s+adapter|adapter)\b/,
+  // Includes "no battery": an item untested only because none came with it.
+  battery: new RegExp(statedFault("batter(?:y|ies)").source +
+    "|\\b(?:no|without)\\s+(?:\\w+\\s+)?batter(?:y|ies)\\b"),
+  charger: /\b(?:no|missing|without)\s+(?:charger|power\s+(?:adapter|cord|supply)|ac\s+adapter|adapter|charging\s+cable)\b/,
   software: /\b(?:no\s+os|needs?\s+(?:os|windows|reinstall)|boots?\s+to\s+bios|password|reinstall)\b/,
   fan_or_thermal: /\b(?:overheat\w*|thermal\s+shut\w*)\b|\bfan\s+(?:error|noise|noisy|loud|grind\w*|rattl\w*|not\s+spinning|failure|issue)|\b(?:loud|noisy|bad|dead|broken|faulty)\s+fan\b/,
   keyboard: statedFault("keyboard|keys"),
@@ -816,7 +819,7 @@ function isMacBook(title) {
 
 // Returns the reference parts cost, or null when the repair is unknown for
 // this item or the listing does not state the fault.
-function getRepairPartsCost(faultType, listing, evidence) {
+export function getRepairPartsCost(faultType, listing, evidence) {
   const prices = REPAIR_PARTS[faultType];
   if (!prices || !REPAIR_EVIDENCE[faultType]?.test(evidence)) return null;
   const key = isMacBook(listing.title) && prices.MacBook !== undefined
@@ -880,6 +883,15 @@ export function pickAuctionSearch(searches, scanSlot) {
   const turn = Math.floor((scanSlot + 3) / searches.length);
   const every = AUCTION_EVERY_TURNS[search.profile_key || search.category || search.name] || 1;
   return turn % every === 0 ? search : null;
+}
+
+// The working-item flip search for this cycle (every third cycle, rotating
+// through categories and their terms), or null.
+export function pickFlipSearch(searches, scanSlot) {
+  if (!searches.length || scanSlot % FLIP_SEARCH_EVERY_CYCLES !== 0) return null;
+  const flipTurn = Math.floor(scanSlot / FLIP_SEARCH_EVERY_CYCLES);
+  const search = searches[flipTurn % searches.length];
+  return { search, query: getSearchTerm(search, Math.floor(flipTurn / searches.length)) };
 }
 
 export function getSearchTerm(search, scanSlot, termLists = SEARCH_TERMS) {
@@ -1090,10 +1102,11 @@ function getLocalResaleRate(category) {
   return getCategoryProfile(category)?.localResaleRate ?? 0.85;
 }
 
-export function getDecisionThresholds(category, buyBudget = DEFAULT_BUY_BUDGET_USD) {
-  // With a small budget every buy is under ~$50, where a $40-50 profit is
-  // rare. $25 profit at a 50%+ return is still worth the work.
-  if (buyBudget <= 75) {
+export function getDecisionThresholds(category, buyBudget = DEFAULT_BUY_BUDGET_USD, purchaseCost = null) {
+  // A buy of $75 or less, where a $40-50 profit is rare: $25 profit at a
+  // 50%+ return is still worth the work. This follows the item's own cost,
+  // so raising the budget does not raise the bar for cheap items.
+  if (buyBudget <= 75 || (purchaseCost !== null && Number(purchaseCost) <= 75)) {
     return {
       buyProfit: 25,
       buyRoi: 50,
@@ -1719,15 +1732,13 @@ async function scanListings(env) {
         searchTasks.push({ search, query, dealType: "repair" });
       }
     }
-    // One working-item flip search per cycle, rotating through categories,
-    // keeps Browse API usage within the daily allowance.
+    // A working-item flip search every third cycle, rotating through
+    // categories. Working items are priced at market (in Nov 2026 flips
+    // averaged $93 all-in against $87 asked for comparables), so they almost
+    // never clear fees; the saved calls go to repairs.
     if (searches.length) {
-      const search = searches[scanSlot % searches.length];
-      searchTasks.push({
-        search,
-        query: getSearchTerm(search, Math.floor(scanSlot / searches.length)),
-        dealType: "flip",
-      });
+      const flip = pickFlipSearch(searches, scanSlot);
+      if (flip) searchTasks.push({ ...flip, dealType: "flip" });
       // One broken-item auction search per cycle for auctions ending soon,
       // where cheap deals happen. Offset so it rotates apart from flips.
       // Low-yield categories take only some of their turns.
@@ -3680,7 +3691,7 @@ async function analyzeNextCandidate(env, excludedCategories = [], queue = null) 
 
   const estimatedProfit =
     recommendedChannel === "eBay" ? ebayProfit : localProfit;
-  const thresholds = getDecisionThresholds(listing.category, getBuyBudget(env));
+  const thresholds = getDecisionThresholds(listing.category, getBuyBudget(env), purchaseCost);
 
   const investment =
     purchaseCost +

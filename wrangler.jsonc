@@ -20,9 +20,11 @@
   "ai": {
     "binding": "AI"
   },
-  // All-in cap (price + shipping + 6% tax) for items BagSpec looks at. Up to
-  // $75 the BUY bar stays at $25 profit and a 50% return; above $75 it rises.
+  // All-in cap (price + shipping + 6% tax) for items BagSpec looks at.
+  // Raised from $75 in Nov 2026: at $75 the pool was mostly old cameras with
+  // no margin. Items up to $75 keep the $25 profit / 50% return BUY bar;
+  // pricier items need more (see getDecisionThresholds).
   "vars": {
-    "BUY_BUDGET_USD": "75"
+    "BUY_BUDGET_USD": "150"
   }
 }

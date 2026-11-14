@@ -301,7 +301,7 @@ const SCREEN_PROMPT = `You screen broken electronics listings for a beginner who
 
 faultType is the one repair the listing itself plainly states:
 - missing_storage, missing_ram, missing_storage_and_ram: drive or memory not included
-- battery, charger: dead/swollen battery or missing charger
+- battery, charger: dead/swollen battery or missing charger. Also use these when the item is untested only because no battery or charger came with it and nothing else is wrong (use whichever is missing; battery if both)
 - software: needs an OS, reset, or boots to BIOS (not a password or device lock)
 - fan_or_thermal: overheating, loud or dead fan
 - keyboard, screen, hinge: a stated broken keyboard, display or hinge on a device that otherwise works
@@ -313,7 +313,7 @@ Set reject true for liquid damage, corrosion, iCloud/activation/BIOS locks, miss
 
 comparisonSearchQuery identifies the exact working product to price it against: brand, exact model and generation (for example "Mark II", "G5", "Slim", "XL"), and storage or CPU when it changes the price. 3 to 8 words. No condition words like broken, parts, repair, working or used.
 
-repairDifficulty and repairRisk are 1-10. repairSuccessProbability is 0-100: missing or easily replaced parts 70-90, a clearly identified minor repair 65-85, powers on but otherwise untested 50-70, no power with unknown cause 20-45, liquid, locks or board faults 5-25. partsCostLow/High are realistic US prices for the parts and supplies. Keep explanation to two plain sentences about the item and the repair. Do not estimate resale value.`;
+repairDifficulty and repairRisk are 1-10. repairSuccessProbability is 0-100: missing or easily replaced parts 70-90, a clearly identified minor repair 65-85, powers on but otherwise untested 50-70, untested only because no battery or charger is included 55-70, no power with unknown cause 20-45, liquid, locks or board faults 5-25. partsCostLow/High are realistic US prices for the parts and supplies. Keep explanation to two plain sentences about the item and the repair. Do not estimate resale value.`;
 
 export async function screenRepairWithClaude(client, listingData) {
   const message = await client.messages.create({
