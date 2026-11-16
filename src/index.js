@@ -3,6 +3,10 @@ import {
   fetchEbayRateLimits,
   flushEbayCallCounts,
   getEbayUsage,
+  getCycleCallBudget,
+  pendingEbayCallTotal,
+  splitBatchCalls,
+  FALLBACK_BATCH_SIZES,
   usageWarning,
 } from "./ebay-usage.js";
 import { renderDashboard } from "./dashboard.js";
@@ -655,7 +659,7 @@ export const FLIP_SEARCH_EVERY_CYCLES = 3;
 // Daily cap on Claude BUY checks (about 1-3 cents each with claude-sonnet-5-5).
 // Override with the CLAUDE_DAILY_CALL_LIMIT variable.
 const DAILY_VERIFICATION_LIMIT = 10;
-const DEFAULT_CLAUDE_MONTHLY_BUDGET_USD = 8;
+const DEFAULT_CLAUDE_MONTHLY_BUDGET_USD = 10;
 // Most the owner will spend on one item, all-in (price + shipping + tax).
 // Override with BUY_BUDGET_USD.
 const DEFAULT_BUY_BUDGET_USD = 50;
@@ -2179,13 +2183,43 @@ async function runAutomatedCycle(env) {
   const cycleId = run.meta.last_row_id;
   const result = {};
 
+  // Batch sizes follow the eBay calls left today (see getCycleCallBudget):
+  // the scan comes off this cycle's share and enrichment and analysis split
+  // the rest. Near the limit, the cycle pauses everything that calls eBay.
+  let budget = null;
+  try {
+    budget = await getCycleCallBudget(env, () => getEbayToken(env));
+  } catch (error) {
+    console.error("Could not size this cycle's batches", error);
+  }
+  const callsBeforeScan = pendingEbayCallTotal();
+  let batchSizes = FALLBACK_BATCH_SIZES;
+  const ebayPaused = { status: "paused: eBay calls for today are nearly used up" };
+
   const stages = [
-    ["scan", () => scanListings(env)],
-    // Each enrichment is one eBay call and each analysis about three
-    // (AI screen, comparables, sometimes a retry), which keeps a cycle well
-    // under Cloudflare's per-invocation subrequest limit.
-    ["enrichment", () => enrichCandidates(env, 7)],
-    ["analysis", () => analyzeCandidateBatch(env, 6)],
+    ["scan", async () => {
+      if (budget?.paused) return ebayPaused;
+      try {
+        return await scanListings(env);
+      } finally {
+        // Sized even when the scan fails part-way, from the calls it did make.
+        if (budget) {
+          const scanCalls = pendingEbayCallTotal() - callsBeforeScan;
+          batchSizes = splitBatchCalls(budget.perCycle - scanCalls);
+          result.batchPlan = {
+            source: budget.source,
+            used: budget.used,
+            limit: budget.limit,
+            cyclesLeft: budget.cyclesLeft,
+            share: Math.round(budget.perCycle * 10) / 10,
+            scanCalls,
+            ...batchSizes,
+          };
+        }
+      }
+    }],
+    ["enrichment", () => budget?.paused ? ebayPaused : enrichCandidates(env, batchSizes.enrichment)],
+    ["analysis", () => budget?.paused ? ebayPaused : analyzeCandidateBatch(env, batchSizes.analysis)],
     ["alerts", () => sendPendingDealAlerts(env, 5)],
     ["watchAlerts", () => sendWatchAlerts(env, 5)],
     ["digest", () => sendDailyWatchDigest(env)],
@@ -4044,7 +4078,7 @@ async function verifyPotentialBuy(env, context, minimumProfit) {
   }
 }
 
-// Monthly Claude budget (default $8, under the $10 the owner can afford).
+// Monthly Claude budget (default $10, the most the owner wants to spend).
 // Screening may use at most 1/30 of it per day so one busy day cannot eat the
 // month; BUY checks only need money left in the month.
 function getClaudeMonthlyBudget(env) {
