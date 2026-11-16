@@ -182,6 +182,98 @@ export async function getEbayUsage(env, accessToken, now = new Date()) {
   };
 }
 
+// Calls counted in this isolate since the last save. The cycle reads this
+// before and after its scan to see what the scan cost.
+export function pendingEbayCallTotal() {
+  let total = 0;
+  for (const calls of pendingCalls.values()) total += calls;
+  return total;
+}
+
+// ---- Self-sizing batches -------------------------------------------------
+// Each cycle gets an even share of the calls eBay has left today. The scan
+// comes off the top and enrichment and analysis split the rest. A quiet
+// stretch leaves calls unspent, so later cycles get bigger shares; a busy
+// one shrinks them. A higher eBay allowance is picked up with no code change.
+
+export const DEFAULT_EBAY_DAILY_LIMIT = 5000;
+export const CYCLE_MINUTES = 5;
+// Kept back for the dashboard and manual checks.
+export const EBAY_RESERVE_SHARE = 0.03;
+// eBay calls per item: an enrichment is one item lookup; an analysis is
+// usually one comparables search, sometimes a broader retry or a sold check.
+// Estimates only: a wrong guess is corrected by the next cycles' shares.
+export const ENRICH_EBAY_CALLS = 1;
+export const ANALYSIS_EBAY_CALLS = 1.3;
+export const BATCH_LIMITS = {
+  enrichment: { min: 2, max: 20 },
+  analysis: { min: 2, max: 15 },
+};
+// Used when eBay's numbers and BagSpec's own count are both unavailable.
+export const FALLBACK_BATCH_SIZES = { enrichment: 7, analysis: 6 };
+
+// The next midnight in Pacific time, when eBay's daily window resets.
+export function nextPacificMidnight(now = new Date()) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    hourCycle: "h23",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(now).map((part) => [part.type, part.value]));
+  const sinceMidnight = (Number(parts.hour) * 3600 + Number(parts.minute) * 60 + Number(parts.second)) * 1000 +
+    now.getUTCMilliseconds();
+  return now.getTime() + 86400000 - sinceMidnight;
+}
+
+export function cycleCallBudget({ limit, used, resetMs, now = new Date() }) {
+  const nowMs = now.getTime();
+  const reset = Number.isFinite(resetMs) && resetMs > nowMs ? resetMs : nextPacificMidnight(now);
+  const cyclesLeft = Math.max(1, Math.ceil((reset - nowMs) / (CYCLE_MINUTES * 60000)));
+  const spendable = limit - Math.ceil(limit * EBAY_RESERVE_SHARE) - used;
+  return {
+    limit,
+    used,
+    cyclesLeft,
+    spendable,
+    perCycle: spendable > 0 ? spendable / cyclesLeft : 0,
+    paused: spendable <= 0,
+  };
+}
+
+// Splits a cycle's calls (after the scan) between enrichment and analysis,
+// about one of each, since enrichment feeds analysis.
+export function splitBatchCalls(calls) {
+  const clamp = (value, { min, max }) => Math.max(min, Math.min(max, Math.floor(value)));
+  const analysis = clamp(calls / (ENRICH_EBAY_CALLS + ANALYSIS_EBAY_CALLS), BATCH_LIMITS.analysis);
+  const enrichment = clamp((calls - analysis * ANALYSIS_EBAY_CALLS) / ENRICH_EBAY_CALLS, BATCH_LIMITS.enrichment);
+  return { enrichment, analysis };
+}
+
+// This cycle's share of today's remaining eBay calls. Uses eBay's own count
+// when it answers, otherwise BagSpec's count against the default limit.
+export async function getCycleCallBudget(env, getToken, now = new Date()) {
+  let main = null;
+  try {
+    const ebay = await fetchEbayRateLimits(await getToken(), { now });
+    if (ebay.available && ebay.main?.limit) main = ebay.main;
+  } catch (error) {
+    console.error("eBay usage check for batch sizing failed", error);
+  }
+  if (main) {
+    return {
+      source: "ebay",
+      ...cycleCallBudget({ limit: main.limit, used: main.used, resetMs: Date.parse(main.reset), now }),
+    };
+  }
+  const own = await getOwnCallCounts(env, now);
+  const limit = Number(env.EBAY_DAILY_CALL_LIMIT) || DEFAULT_EBAY_DAILY_LIMIT;
+  return {
+    source: "own count",
+    ...cycleCallBudget({ limit, used: own.today.total, resetMs: nextPacificMidnight(now), now }),
+  };
+}
+
 // Test helper.
 export function resetEbayUsageState() {
   pendingCalls.clear();
