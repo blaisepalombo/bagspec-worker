@@ -2283,6 +2283,10 @@ async function runAutomatedCycle(env) {
       filtered: result.analysis?.filtered || 0,
       alerted: result.alerts?.sent || 0,
       ebayCalls,
+      // How this cycle was sized, e.g. "ebay 2850/5000, 5/4" or "paused".
+      batch: budget?.paused ? "paused" : result.batchPlan
+        ? `${result.batchPlan.source} ${result.batchPlan.used}/${result.batchPlan.limit}, ${result.batchPlan.enrichment}/${result.batchPlan.analysis}`
+        : "fixed 7/6",
     }),
     errors.join(" | ").slice(0, 1000) || null,
     cycleId
