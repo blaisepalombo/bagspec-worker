@@ -1,3 +1,4 @@
+import { offerRange } from "./offers.js";
 // iPhone push notifications for the BagSpec app, sent straight to Apple
 // (APNs) with a token-based key, so no Firebase or other paid relay.
 //
@@ -160,7 +161,7 @@ export function dealNotification(listing) {
   const price = auction
     ? (canBid ? `Bid up to ${money(listing.suggested_offer)} (now ${money(listing.price)})` : `Now ${money(listing.price)}`)
     : offer
-      ? `Offer up to ${money(listing.suggested_offer)} (asks ${money(listing.price)})`
+      ? `Offer ${offerRange(listing.price, listing.suggested_offer, 2)} (asks ${money(listing.price)})`
       : `${money(listing.total_buy_cost)} all-in`;
   const label = `${auction ? "Auction " : ""}${watch ? "WATCH" : "BUY"}`;
   return {
