@@ -14,24 +14,33 @@ Two deal types are scanned:
 
 - **Repair**: "For parts or not working" listings, screened by AI for a
   realistic DIY repair.
-- **Flip**: one Used, fixed-price search per cycle (rotating categories, up
-  to each category's `flipMaxPrice`). Listings that mention any fault or
+- **Flip**: one Used, fixed-price search every third cycle
+  (`FLIP_SEARCH_EVERY_CYCLES`; rotating categories and terms, up to each
+  category's `flipMaxPrice`). Listings that mention any fault or
   uncertainty are rejected, the AI repair screening is skipped, and profit
   comes straight from working comparables. Flips are tagged on the
   dashboard and in Discord alerts.
 
-**Budget**: BagSpec only looks at items that cost at most $75 all-in
+**Budget**: BagSpec only looks at items that cost at most $150 all-in
 (price + shipping + 6% tax; set by `BUY_BUDGET_USD` in `wrangler.jsonc`, and
 the default is $50). eBay searches ask only for items priced under that, and
-anything that ends up over it after real shipping is passed. With a budget
-of $75 or less, a BUY needs $25+ profit
-and a 50%+ return (WATCH: $15 and 35%). Searches favor broken cameras and
-Nintendo handhelds, which fit the budget best.
+anything that ends up over it after real shipping is passed. The BUY bar
+follows the item's own cost (`getDecisionThresholds`): an item of $75 or
+less needs $25+ profit and a 50%+ return (WATCH: $15 and 35%); pricier items
+need the category's higher bar, for example $50 for laptops and cameras.
 
 **Auctions**: one search per cycle looks at a whole eBay category for
 broken-item auctions ending 10 minutes to 12 hours from now. They go to the front of the queue, and a
 BUY alert gives the most to bid (`auctionMaxBid`) that still makes the BUY
 profit and return within budget.
+
+**Best Offer**: listings that accept offers may ask up to 1.4x the budget.
+BagSpec works out the most to offer that still makes the BUY profit, and only
+keeps the deal (WATCH or BUY) when that is at least 85% of the asking price
+(`OFFER_FLOOR_SHARE` in `src/offers.js`), because eBay sellers usually
+decline lower offers. Alerts, the digest, pushes and the dashboard show where
+to open (85% of the asking price) and the most to offer, for example
+"Offer $73-$80 (asks $85)".
 
 **Handhelds**: broken Nintendo handhelds (DS, 3DS, Switch Lite, Game Boy)
 listed "for parts" with a simple stated fault (hinge, screen, battery,
@@ -51,7 +60,7 @@ listings from the last 24 hours, once a day.
 $0.0005 a listing), falling back to the free Workers AI model if Claude
 fails or the budget is used up. Repairs that need soldering are passed.
 Estimated Claude spend is tracked in the `claude_spend` table and capped by
-`CLAUDE_MONTHLY_BUDGET_USD` (default $8 a month; screening may use at most
+`CLAUDE_MONTHLY_BUDGET_USD` (default $10 a month; screening may use at most
 1/30 of it per day). `/diagnostics` shows the current spend.
 
 A BUY needs evidence, not just an estimate:
@@ -79,10 +88,37 @@ A BUY needs evidence, not just an estimate:
   each); change the cap with `CLAUDE_DAILY_CALL_LIMIT`.
 - **Too cheap to be real**: a working flip priced under half of the
   comparables lower quartile is rejected as a likely fake or scam.
+- **Scam guards** (`getScamCheck`): off-eBay payment requests (Zelle,
+  Venmo, gift cards, WhatsApp and so on) and "box only", replica or
+  photo-of listings are passed outright. Flips also collect warning points:
+  a new seller or low feedback, a description that only repeats the title,
+  one photo, stock-photo wording, contact details, no returns, and a price
+  far under the comparables when a trust problem is already present.
+  5+ points pass the listing; 2+ block BUY.
 - Laptops released before 2017, low-end processors, listings without a
   processor, and items relisted at an unchanged price are rejected. It rejects obvious accessories, obsolete laptops,
 locked devices, liquid damage, bulk lots, and incomplete products before
 spending calls on enrichment or AI analysis.
+
+## Queue and eBay limits
+
+Each 5-minute cycle scans, enriches new listings with eBay item details, and
+analyzes the best-ranked candidates. Listings get at least 4 hours in the
+queue (or until 12 hours after they were listed); ones close to that
+deadline move up. Listings rejected by simple rules don't use up analysis
+slots. When fewer than 3 comparables are found, the comparables search
+retries once with a broader query.
+
+eBay allows 5,000 Browse API calls a day. Batch sizes follow what is left
+(`getCycleCallBudget` in `src/ebay-usage.js`): each cycle takes an even
+share of today's remaining calls (minus a 3% reserve) across the cycles
+until midnight Pacific, the scan comes off the top, and enrichment (2-20)
+and analysis (2-15) split the rest. Near the limit, the cycle pauses
+everything that calls eBay. A higher limit from eBay is used with no code
+change. Each `cycle_runs` summary records its sizing, for example
+`"batch": "ebay 3780/5000, 5/4"`. The dashboard's Operations tab shows
+today's usage (`/api/ebay/rate-limits`), and the digest adds a warning when
+usage is high.
 
 ## iPhone app
 
@@ -97,6 +133,8 @@ in `app/README.md`.
 - `DB`: D1 database named `bagspec-production`
 - `AI`: Workers AI binding
 - Cron: every five minutes
+- Plan: Workers Paid (since Nov 16, 2026), which lifts the free plan's
+  50-requests-per-run and daily D1 caps
 
 ## Runtime secrets
 
@@ -109,6 +147,9 @@ The following secrets stay in Cloudflare and must never be committed:
 - `DISCORD_WEBHOOK_URL`
 - `ANTHROPIC_API_KEY` (Claude BUY check; without it nothing reaches BUY)
 - `CLAUDE_DAILY_CALL_LIMIT` (optional, default 10)
+- `CLAUDE_MONTHLY_BUDGET_USD` (optional, default 10)
+- `EBAY_DAILY_CALL_LIMIT` (optional, default 5000; only used when eBay's own
+  usage numbers are unavailable)
 - `EBAY_RUNAME` (optional; turns on "Connect eBay" in My flips)
 - `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_PRIVATE_KEY` (optional; iPhone push for the
   app in `app/`, see `app/README.md`)
@@ -149,10 +190,13 @@ the `BAGSPEC_ADMIN_KEY` secret as the password.
 
 - `/setup-v2`: idempotently upgrades the existing D1 configuration and keeps
   historical listings.
-- `/cycle`: runs a scan, enriches up to five listings, and analyzes the best
-  ready candidate, then sends any unalerted `BUY` deals to Discord.
+- `/cycle`: runs one full cycle by hand, the same as the cron (scan,
+  enrichment, analysis, alerts).
 - `/test-discord`: sends a harmless test notification to the configured
   Discord webhook.
-- `/dashboard`: public, read-only deal desk (My flips and the full
-  Operations view need the login) with deals, recent listings, and scanner health. Open this route in your browser and sign in with the existing BagSpec admin credentials. The displayed resale and profit figures are estimates, and each listing still needs inspection.\n- `/deals`: shows all current `BUY` and `WATCH` results.
+- `/dashboard`: the deal desk, with deals, My flips, recent listings and
+  scanner health. Everything on it needs the login (signed-out visitors see
+  only a sign-in panel). The resale and profit figures are estimates, and
+  each listing still needs inspection.
+- `/deals`: shows all current `BUY` and `WATCH` results.
 - `/stats`, `/listings`, and `/candidates`: operational views.
