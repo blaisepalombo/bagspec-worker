@@ -10,6 +10,7 @@ import {
   usageWarning,
 } from "./ebay-usage.js";
 import { renderDashboard } from "./dashboard.js";
+import { OFFER_FLOOR_SHARE, offerRange } from "./offers.js";
 import { ensureInventoryTable, handleInventoryRequest } from "./inventory.js";
 import {
   finishEbayConnect,
@@ -653,7 +654,7 @@ const AUCTION_LISTINGS_PER_SEARCH = 40;
 // asking price (sellers rarely accept much lower). Searched every other cycle
 // to keep Browse API calls down.
 const BEST_OFFER_BUDGET_MULTIPLIER = 1.4;
-const BEST_OFFER_MIN_SHARE_OF_ASKING = 0.75;
+const BEST_OFFER_MIN_SHARE_OF_ASKING = OFFER_FLOOR_SHARE;
 const BEST_OFFER_SEARCH_EVERY_CYCLES = 2;
 export const FLIP_SEARCH_EVERY_CYCLES = 3;
 // Daily cap on Claude BUY checks (about 1-3 cents each with claude-sonnet-5-5).
@@ -2861,8 +2862,8 @@ export function buildDiscordDealPayload(listing) {
           }
         : Number(listing.offer_needed) === 1
         ? {
-            name: "Offer up to",
-            value: `$${Number(listing.suggested_offer || 0).toFixed(2)} (asks $${Number(listing.price || 0).toFixed(2)})`,
+            name: "Offer",
+            value: `${offerRange(listing.price, listing.suggested_offer, 2)} (asks $${Number(listing.price || 0).toFixed(2)})`,
             inline: true,
           }
         : {
@@ -2943,7 +2944,7 @@ export function buildDiscordDealPayload(listing) {
     content: listing.deal_type === "auction"
       ? `⏰ **BagSpec auction deal**: bid up to $${Number(listing.suggested_offer || 0).toFixed(2)}`
       : Number(listing.offer_needed) === 1
-        ? `🤝 **BagSpec Best Offer deal**: offer up to $${Number(listing.suggested_offer || 0).toFixed(2)}`
+        ? `🤝 **BagSpec Best Offer deal**: offer ${offerRange(listing.price, listing.suggested_offer, 2)}`
         : "🔥 **BagSpec found a BUY deal**",
     embeds: [embed],
   };
@@ -2976,7 +2977,7 @@ export function buildWatchDigestPayload(rows, localDate, usageNote = null) {
     const kind = row.deal_type === "auction"
       ? `auction, bid up to $${Number(row.suggested_offer || 0).toFixed(0)}`
       : Number(row.offer_needed) === 1
-        ? `${row.deal_type === "flip" ? "working flip" : "repair"}, offer up to $${Number(row.suggested_offer || 0).toFixed(0)} (asks $${Number(row.price || 0).toFixed(0)})`
+        ? `${row.deal_type === "flip" ? "working flip" : "repair"}, offer ${offerRange(row.price, row.suggested_offer)} (asks $${Number(row.price || 0).toFixed(0)})`
         : row.deal_type === "flip" ? "working flip" : "repair";
     return `**${index + 1}. [${truncateDiscord(row.title, 90)}](${row.item_url})**\n` +
       `$${Number(row.total_buy_cost || 0).toFixed(2)} all-in • ` +
@@ -3794,6 +3795,7 @@ async function analyzeNextCandidate(env, excludedCategories = [], queue = null) 
     !analysis.reject &&
     !comps.lowConfidence &&
     comps.count >= 3 &&
+    offerHasRoom &&
     estimatedProfit >= thresholds.watchProfit &&
     roiPercent >= thresholds.watchRoi &&
     successProbability >= 60
@@ -3870,9 +3872,12 @@ async function analyzeNextCandidate(env, excludedCategories = [], queue = null) 
     )
   );
 
-  const lowballCap = roundMoney(
-    Math.max(0, Number(listing.price || 0) * 0.8)
-  );
+  // An in-budget listing already works at its price. If it takes offers,
+  // suggest one between the polite floor and the price; otherwise the price.
+  const askingPrice = Number(listing.price || 0);
+  const inBudgetOffer = acceptsOffers(savedDetails.buyingOptions)
+    ? roundMoney(Math.min(askingPrice, Math.max(calculatedOffer, Math.ceil(askingPrice * BEST_OFFER_MIN_SHARE_OF_ASKING))))
+    : askingPrice;
 
   // For an auction the "offer" is the most to bid; for an over-budget Best
   // Offer listing it is the most to offer.
@@ -3881,7 +3886,7 @@ async function analyzeNextCandidate(env, excludedCategories = [], queue = null) 
       ? 0
       : isAuction || offerDeal
         ? auctionMaxBid
-        : Math.min(calculatedOffer, lowballCap);
+        : inBudgetOffer;
 
   const profitScore = clamp(
     (Math.max(estimatedProfit, 0) / 100) * 35,
@@ -3920,10 +3925,13 @@ async function analyzeNextCandidate(env, excludedCategories = [], queue = null) 
       : `${recommendation}: The likely issue is ${analysis.likelyIssue}. Repair difficulty is ${analysis.repairDifficulty}/10, risk is ${repairRisk}/10, and estimated repair success is ${successProbability}%. BagSpec found ${comps.count} valid working comparables and estimated resale at $${ebayResale.toFixed(2)} on eBay or $${localResale.toFixed(2)} locally. Estimated parts cost is $${partsCost.toFixed(2)}, producing an estimated ${recommendedChannel} profit of $${estimatedProfit.toFixed(2)} and an ROI of ${roiPercent.toFixed(1)}%.`;
 
   const claudeNote = verification ? ` Claude check: ${verification.reason}` : "";
-  const offerNote = offerDeal && recommendation !== "PASS"
-    ? ` Asks $${Number(listing.price || 0).toFixed(2)} with Best Offer: profit assumes the seller accepts an offer up to $${auctionMaxBid.toFixed(2)}.` +
-      (offerPlan.realistic ? "" : ` That is under ${Math.round(BEST_OFFER_MIN_SHARE_OF_ASKING * 100)}% of the asking price, so it may be declined; WATCH only.`)
-    : "";
+  const offerNote = !offerDeal
+    ? ""
+    : offerPlan.realistic && recommendation !== "PASS"
+      ? ` Asks $${Number(listing.price || 0).toFixed(2)} with Best Offer: offer ${offerRange(listing.price, auctionMaxBid, 2)}. Profit assumes the seller accepts up to $${auctionMaxBid.toFixed(2)}.`
+      : !offerPlan.realistic
+        ? ` Asks $${Number(listing.price || 0).toFixed(2)} with Best Offer, but it only works at $${Math.max(0, auctionMaxBid).toFixed(2)} or less, under ${Math.round(BEST_OFFER_MIN_SHARE_OF_ASKING * 100)}% of the asking price. eBay sellers usually decline offers that low.`
+        : "";
   const explanationWithLimits = (
     recommendation === "WATCH" && buyBlockedBy.length && !verification
       ? `${finalExplanation} Not eligible for BUY: ${buyBlockedBy.join("; ")}.`

@@ -32,10 +32,11 @@ test("Best Offer listings may ask up to 1.4x the budget", () => {
   assert.equal(isOfferDeal(90, env75, false), false);
 });
 
-test("an offer is only realistic at 75% or more of the asking price", () => {
-  assert.deepEqual(getBestOfferPlan({ maxOffer: 66, askingPrice: 88 }),
-    { maxOffer: 66, minRealistic: 66, realistic: true });
-  assert.equal(getBestOfferPlan({ maxOffer: 65, askingPrice: 88 }).realistic, false);
+test("an offer is only realistic at 85% or more of the asking price", () => {
+  // eBay sellers usually decline lower offers: $88 x 0.85 = $74.80 -> $75.
+  assert.deepEqual(getBestOfferPlan({ maxOffer: 75, askingPrice: 88 }),
+    { maxOffer: 75, minRealistic: 75, realistic: true });
+  assert.equal(getBestOfferPlan({ maxOffer: 74, askingPrice: 88 }).realistic, false);
   assert.equal(getBestOfferPlan({ maxOffer: 0, askingPrice: 0 }).realistic, false);
 });
 
@@ -59,25 +60,26 @@ test("the max offer keeps the BUY profit and return within budget", () => {
 
 test("alerts say how much to offer", () => {
   const push = dealNotification({ id: 9, title: "Sony a6000 body", deal_type: "flip", recommendation: "BUY",
-    offer_needed: 1, suggested_offer: 62, price: 85, total_buy_cost: 98.58, estimated_profit: 41 });
+    offer_needed: 1, suggested_offer: 80, price: 85, total_buy_cost: 98.58, estimated_profit: 41 });
   assert.equal(push.kind, "buy");
-  assert.equal(push.message.body, "Offer up to $62.00 (asks $85.00) · est. $41.00 profit");
+  // Opens at 85% of the asking price ($72.25 -> $73), up to the max.
+  assert.equal(push.message.body, "Offer $73–$80.00 (asks $85.00) · est. $41.00 profit");
 
   const plain = dealNotification({ id: 10, title: "Sony a6000 body", deal_type: "flip", recommendation: "BUY",
     offer_needed: 0, suggested_offer: 50, price: 60, total_buy_cost: 68, estimated_profit: 41 });
   assert.equal(plain.message.body, "$68.00 all-in · est. $41.00 profit");
 
   const discord = buildDiscordDealPayload({ id: 9, title: "Sony a6000 body", item_url: "https://www.ebay.com/itm/9",
-    deal_type: "flip", recommendation: "BUY", offer_needed: 1, suggested_offer: 62, price: 85,
+    deal_type: "flip", recommendation: "BUY", offer_needed: 1, suggested_offer: 80, price: 85,
     total_buy_cost: 98.58, estimated_profit: 41, reasoning: "{}" });
-  assert.match(discord.content, /Best Offer deal\*\*: offer up to \$62\.00/);
-  const field = discord.embeds[0].fields.find((f) => f.name === "Offer up to");
-  assert.equal(field.value, "$62.00 (asks $85.00)");
+  assert.match(discord.content, /Best Offer deal\*\*: offer \$73–\$80\.00/);
+  const field = discord.embeds[0].fields.find((f) => f.name === "Offer");
+  assert.equal(field.value, "$73–$80.00 (asks $85.00)");
 
   const digest = buildWatchDigestPayload([{ title: "Sony a6000 body", item_url: "https://www.ebay.com/itm/9",
     total_buy_cost: 98.58, estimated_profit: 30, roi_percent: 40, category: "Cameras", deal_type: "flip",
-    offer_needed: 1, suggested_offer: 62, price: 85, recommendation: "WATCH" }], "2026-11-13");
-  assert.match(digest.embeds[0].description, /working flip, offer up to \$62 \(asks \$85\)/);
+    offer_needed: 1, suggested_offer: 80, price: 85, recommendation: "WATCH" }], "2026-11-13");
+  assert.match(digest.embeds[0].description, /working flip, offer \$73–\$80 \(asks \$85\)/);
 });
 
 // --- Scan: the Best Offer search and the budget gate ---------------------
@@ -187,4 +189,12 @@ test("a scan searches Best Offer listings just over budget and keeps those that 
     Date.now = realNow;
     globalThis.fetch = realFetch;
   }
+});
+
+test("the opener never goes above the max offer", async () => {
+  const { openingOffer, offerRange } = await import("../src/offers.js");
+  assert.equal(openingOffer(100, 95), 85);
+  assert.equal(openingOffer(100, 85), 85);
+  assert.equal(offerRange(100, 85), "$85");
+  assert.equal(offerRange(100, 92), "$85–$92");
 });
